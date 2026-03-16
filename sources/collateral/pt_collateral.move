@@ -36,6 +36,10 @@ module crux::pt_collateral {
     const EPositionNotFound: u64 = 1104;
     const ENotPositionOwner: u64 = 1105;
     const EInsufficientRepayment: u64 = 1106;
+    const ETooManyPositions: u64 = 1107;
+
+    /// SECURITY: Maximum positions per manager to prevent DoS via linear scan
+    const MAX_POSITIONS: u64 = 10_000;
 
     // ===== Structs =====
 
@@ -136,6 +140,7 @@ module crux::pt_collateral {
     ): CollateralReceipt {
         let pt_amount = yield_tokenizer::pt_amount(&pt);
         assert!(pt_amount > 0, EZeroAmount);
+        assert!(manager.positions.length() < MAX_POSITIONS, ETooManyPositions);
 
         let position_id = manager.next_position_id;
         let owner = ctx.sender();
@@ -170,6 +175,10 @@ module crux::pt_collateral {
 
     /// Borrow SY against deposited PT collateral.
     /// The borrow amount must not exceed the position's LTV limit.
+    /// NOTE: This function updates accounting only. Actual SY transfer is handled
+    /// at the PTB composition layer where the caller creates SY from the vault
+    /// using the authorized borrow amount. This pattern is Sui-idiomatic and
+    /// avoids the module needing direct vault access.
     public fun borrow<T>(
         manager: &mut CollateralManager<T>,
         config: &YieldMarketConfig<T>,

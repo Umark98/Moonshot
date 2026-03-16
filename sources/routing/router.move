@@ -55,9 +55,12 @@ module crux::router {
     /// locking in the current implied fixed rate.
     ///
     /// Example: Deposit 1000 haSUI, get PT-haSUI at 7% fixed rate for 6 months.
+    /// MAINNET: One-click fixed-rate deposit.
+    /// Underlying → swap on AMM for PT → PT transferred to user.
+    /// The underlying goes directly into the pool's real balance.
     #[allow(lint(self_transfer))]
     public fun fixed_rate_deposit<T>(
-        vault: &mut SYVault<T>,
+        vault: &SYVault<T>,
         pool: &mut YieldPool<T>,
         config: &mut YieldMarketConfig<T>,
         underlying: Coin<T>,
@@ -68,11 +71,8 @@ module crux::router {
         let underlying_amount = underlying.value();
         assert!(underlying_amount > 0, EZeroAmount);
 
-        // Step 1: Deposit underlying into SY vault
-        let sy_token = standardized_yield::deposit(vault, underlying, ctx);
-
-        // Step 2: Swap SY for PT on the AMM (now returns actual PT object)
-        let pt = rate_market::swap_sy_for_pt(pool, config, sy_token, min_pt_out, clock, ctx);
+        // MAINNET: Swap underlying directly for PT on the AMM
+        let pt = rate_market::swap_sy_for_pt(pool, vault, config, underlying, min_pt_out, clock, ctx);
 
         let pt_out = yield_tokenizer::pt_amount(&pt);
         let implied_rate = rate_market::current_implied_rate(pool);
@@ -120,38 +120,33 @@ module crux::router {
     /// NOTE: This is a simplified version. The full implementation would use flash_mint
     /// for maximum capital efficiency. This version requires the user to own the full
     /// underlying amount upfront.
+    /// MAINNET: Deposit underlying and mint PT+YT, sell PT for underlying, keep YT.
+    /// User gets leveraged yield exposure (YT) + recovered underlying.
     #[allow(lint(self_transfer))]
     public fun deposit_and_get_yt<T>(
-        vault: &mut SYVault<T>,
+        vault: &SYVault<T>,
         config: &mut YieldMarketConfig<T>,
         pool: &mut YieldPool<T>,
         underlying: Coin<T>,
         min_yt_amount: u64,
+        min_underlying_recovered: u64,
         clock: &Clock,
         ctx: &mut TxContext,
     ) {
         let underlying_amount = underlying.value();
         assert!(underlying_amount > 0, EZeroAmount);
 
-        // Step 1: Deposit underlying into SY
-        let sy_token = standardized_yield::deposit(vault, underlying, ctx);
-
-        // Step 2: Mint PT + YT from SY
-        let (pt, yt) = yield_tokenizer::mint_py(config, sy_token, clock, ctx);
+        // Step 1: Mint PT + YT by depositing underlying into config reserve
+        let (pt, yt) = yield_tokenizer::mint_py(config, vault, underlying, clock, ctx);
 
         let yt_amount = yield_tokenizer::yt_amount(&yt);
         assert!(yt_amount >= min_yt_amount, ESlippageExceeded);
 
-        // Step 3: Sell PT on AMM for SY (user recovers most of their capital)
-        let sy_recovered = rate_market::swap_pt_for_sy(pool, vault, config, pt, 0, clock, ctx);
+        // Step 2: Sell PT on AMM for underlying (user recovers most of their capital)
+        let recovered = rate_market::swap_pt_for_sy(pool, vault, config, pt, min_underlying_recovered, clock, ctx);
 
-        // Transfer recovered SY to user
-        sui::transfer::public_transfer(sy_recovered, ctx.sender());
-
-        // The user now has:
-        // - YT (leveraged yield exposure) → transferred to user
-        // - Recovered SY from selling PT → transferred to user
-        // Net cost = underlying_amount - sy_recovered (the "premium" for yield exposure)
+        // Transfer recovered underlying to user
+        sui::transfer::public_transfer(recovered, ctx.sender());
 
         let leverage = crux::amm_math::yt_leverage(
             crux::amm_math::pt_price_from_rate(
@@ -174,13 +169,15 @@ module crux::router {
 
     // ===== Yield Management =====
 
-    /// Claim yield from a YT position and optionally compound by buying more YT.
+    /// Claim yield from a YT position.
+    /// MAINNET: Returns actual Coin<T> to the caller.
     public fun claim_yield<T>(
         config: &mut YieldMarketConfig<T>,
+        vault: &SYVault<T>,
         yt: &mut YT<T>,
         ctx: &mut TxContext,
-    ): u64 {
-        yield_tokenizer::claim_yield(config, yt, ctx)
+    ): Coin<T> {
+        yield_tokenizer::claim_yield(config, vault, yt, ctx)
     }
 
     // ===== Position Information =====

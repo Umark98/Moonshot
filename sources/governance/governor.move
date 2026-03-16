@@ -2,6 +2,8 @@ module crux::governor {
     use sui::clock::Clock;
     use sui::event;
 
+    use crux::ve_staking::{Self, VeStakingPool, VeToken};
+
     // ===== Error Codes =====
     const EProposalNotFound: u64 = 950;
     const EProposalExpired: u64 = 951;
@@ -11,6 +13,15 @@ module crux::governor {
     const EVotingNotEnded: u64 = 955;
     const EQuorumNotReached: u64 = 956;
     const EProposalDefeated: u64 = 957;
+    const EDescriptionTooLong: u64 = 958;
+    const ETooManyProposals: u64 = 959;
+    const EInsufficientStake: u64 = 960;
+
+    /// SECURITY: Maximum active proposals to prevent DoS
+    const MAX_PROPOSALS: u64 = 1_000;
+
+    /// SECURITY: Minimum veCRUX voting power to create a proposal (1000 veCRUX)
+    const MIN_PROPOSAL_STAKE_WAD: u128 = 1_000_000_000_000_000_000_000; // 1000 * WAD
 
     // ===== Governance Parameters =====
     const VOTING_PERIOD_MS: u64 = 259_200_000;   // 3 days
@@ -98,12 +109,23 @@ module crux::governor {
     // ===== Public Functions =====
 
     /// Create a new proposal. Returns the proposal ID.
+    /// SECURITY: Requires minimum veCRUX stake to prevent spam proposals.
+    /// Description length capped at 1024 bytes to prevent state bloat.
     public fun create_proposal(
         state: &mut GovernorState,
+        pool: &VeStakingPool,
+        ve_token: &VeToken,
         description: vector<u8>,
         clock: &Clock,
         ctx: &mut TxContext,
     ): u64 {
+        // SECURITY: Verify proposer has minimum veCRUX stake
+        let position_id = ve_staking::ve_token_position_id(ve_token);
+        let ve_power = ve_staking::position_ve_amount(pool, position_id);
+        assert!(ve_power >= MIN_PROPOSAL_STAKE_WAD, EInsufficientStake);
+
+        assert!(description.length() <= 1024, EDescriptionTooLong);
+        assert!(state.proposals.length() < MAX_PROPOSALS, ETooManyProposals);
         let now = clock.timestamp_ms();
         let proposal_id = state.next_proposal_id;
         let end_ms = now + VOTING_PERIOD_MS;
@@ -137,11 +159,14 @@ module crux::governor {
     }
 
     /// Cast a vote on an active proposal.
+    /// SECURITY: Vote weight is derived from the voter's verified veCRUX position,
+    /// not supplied by the caller, preventing vote weight manipulation.
     public fun cast_vote(
         state: &mut GovernorState,
+        pool: &VeStakingPool,
+        ve_token: &VeToken,
         proposal_id: u64,
         support: bool,
-        vote_weight: u64,
         clock: &Clock,
         ctx: &TxContext,
     ) {
@@ -156,6 +181,10 @@ module crux::governor {
 
         let voter = ctx.sender();
         assert!(!has_voted(proposal, voter), EAlreadyVoted);
+
+        // SECURITY: Derive vote weight from verified on-chain veCRUX position
+        let ve_amount_wad = ve_staking::position_ve_amount(pool, ve_staking::ve_token_position_id(ve_token));
+        let vote_weight = ((ve_amount_wad / 1_000_000_000_000_000_000) as u64); // WAD to u64
 
         if (support) {
             proposal.votes_for = proposal.votes_for + vote_weight;

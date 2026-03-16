@@ -110,7 +110,7 @@ module crux::suilend_adapter {
         adapter.last_sync_ms = now;
 
         // Propagate rate update to the SY vault
-        standardized_yield::update_exchange_rate(vault, new_ctoken_rate, clock);
+        standardized_yield::update_exchange_rate_internal(vault, new_ctoken_rate, clock);
 
         event::emit(RateSynced {
             adapter_id: object::id(adapter),

@@ -2,16 +2,20 @@ module crux::gauge_voting {
     use sui::clock::Clock;
     use sui::event;
     use crux::fixed_point;
+    use crux::ve_staking::{Self, VeStakingPool, VeToken};
 
     // ===== Error Codes =====
     const EGaugeNotFound: u64 = 970;
     const EGaugeNotActive: u64 = 971;
     const EEpochNotEnded: u64 = 972;
     const EZeroVotes: u64 = 973;
+    const EAlreadyVotedThisEpoch: u64 = 974;
     // ===== Constants =====
     const WAD: u128 = 1_000_000_000_000_000_000;
     const DEFAULT_EPOCH_DURATION_MS: u64 = 604_800_000;   // 7 days
     const DEFAULT_EMISSIONS_PER_EPOCH: u64 = 50_000;       // 50k CRUX per week
+    /// Maximum total emissions across all epochs (100M CRUX liquidity mining budget)
+    const MAX_TOTAL_EMISSIONS: u64 = 100_000_000;
 
     // ===== Structs =====
 
@@ -23,6 +27,10 @@ module crux::gauge_voting {
         epoch_duration_ms: u64,
         total_votes: u128,
         emissions_per_epoch: u64,
+        /// SECURITY: Track total emissions to enforce cap
+        total_emissions_distributed: u64,
+        /// SECURITY: Track which positions have voted this epoch to prevent double-voting
+        voted_positions_this_epoch: vector<u64>,
     }
 
     public struct Gauge has store, drop, copy {
@@ -85,6 +93,8 @@ module crux::gauge_voting {
             epoch_duration_ms: DEFAULT_EPOCH_DURATION_MS,
             total_votes: 0,
             emissions_per_epoch: DEFAULT_EMISSIONS_PER_EPOCH,
+            total_emissions_distributed: 0,
+            voted_positions_this_epoch: vector[],
         };
         let controller_id = object::id(&controller);
         transfer::share_object(controller);
@@ -92,7 +102,8 @@ module crux::gauge_voting {
     }
 
     /// Register a new pool gauge in the controller.
-    public fun add_gauge(controller: &mut GaugeController, pool_id: ID) {
+    /// SECURITY: Restricted to package-internal calls to prevent spam gauge creation.
+    public(package) fun add_gauge(controller: &mut GaugeController, pool_id: ID) {
         let gauge_index = controller.gauges.length();
         let gauge = Gauge {
             pool_id,
@@ -109,15 +120,32 @@ module crux::gauge_voting {
 
     /// Cast a veCRUX vote for a gauge. Returns a VoteRecord that prevents
     /// the same voter from voting twice in the same epoch.
+    /// SECURITY: Vote weight is derived from verified on-chain veCRUX position,
+    /// not supplied by the caller. Requires VeToken + VeStakingPool.
     public fun cast_vote(
         controller: &mut GaugeController,
+        pool: &VeStakingPool,
+        ve_token: &VeToken,
         gauge_index: u64,
-        vote_amount_wad: u128,
         clock: &Clock,
         ctx: &mut TxContext,
     ): VoteRecord {
-        assert!(vote_amount_wad > 0, EZeroVotes);
         assert!(gauge_index < controller.gauges.length(), EGaugeNotFound);
+
+        // SECURITY: Derive vote weight from verified veCRUX position
+        let position_id = ve_staking::ve_token_position_id(ve_token);
+        let vote_amount_wad = ve_staking::position_ve_amount(pool, position_id);
+        assert!(vote_amount_wad > 0, EZeroVotes);
+
+        // SECURITY: Prevent double-voting with same position in same epoch
+        let voted = &controller.voted_positions_this_epoch;
+        let mut i = 0u64;
+        let len = voted.length();
+        while (i < len) {
+            assert!(voted[i] != position_id, EAlreadyVotedThisEpoch);
+            i = i + 1;
+        };
+        controller.voted_positions_this_epoch.push_back(position_id);
 
         let gauge = &mut controller.gauges[gauge_index];
         assert!(gauge.is_active, EGaugeNotActive);
@@ -136,7 +164,6 @@ module crux::gauge_voting {
             epoch,
         });
 
-        // Advance clock reference to satisfy borrow rules
         let _ = clock;
 
         VoteRecord {
@@ -157,8 +184,16 @@ module crux::gauge_voting {
         assert!(now >= epoch_end, EEpochNotEnded);
 
         // Emit emissions accounting for the closing epoch before resetting.
+        // SECURITY: Cap emissions at remaining budget
         let closing_epoch = controller.current_epoch;
-        let total_distributed = controller.emissions_per_epoch;
+        let remaining = MAX_TOTAL_EMISSIONS - controller.total_emissions_distributed;
+        let total_distributed = if (controller.emissions_per_epoch > remaining) {
+            remaining
+        } else {
+            controller.emissions_per_epoch
+        };
+        controller.total_emissions_distributed = controller.total_emissions_distributed + total_distributed;
+
         event::emit(EmissionsDistributed {
             epoch: closing_epoch,
             total_distributed,
@@ -175,6 +210,8 @@ module crux::gauge_voting {
         controller.total_votes = 0;
         controller.current_epoch = closing_epoch + 1;
         controller.epoch_start_ms = epoch_end;
+        // SECURITY: Reset voted positions for new epoch
+        controller.voted_positions_this_epoch = vector[];
 
         event::emit(EpochAdvanced {
             new_epoch: controller.current_epoch,

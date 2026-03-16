@@ -16,6 +16,7 @@ module crux::flash_mint {
     use sui::clock::Clock;
     use sui::event;
 
+    use sui::coin::Coin;
     use crux::yield_tokenizer::{Self, YieldMarketConfig, PT, YT};
     use crux::standardized_yield::{Self, SYVault, SYToken};
 
@@ -117,29 +118,49 @@ module crux::flash_mint {
     /// Repay a flash mint receipt with SY tokens.
     /// The SY payment must cover the owed amount + fee.
     /// This consumes the hot potato receipt, completing the flash mint.
+    /// SECURITY: SY is now frozen as reserve backing rather than lost.
+    /// The supply tracking in YieldMarketConfig accounts for the minted PT+YT.
+    /// Repay a flash mint receipt with underlying tokens.
+    /// MAINNET: The underlying is deposited into the YieldMarketConfig's real reserve,
+    /// backing the PT+YT that were created in flash_mint.
     public fun repay_flash_mint<T>(
-        _vault: &mut SYVault<T>,
+        config: &mut YieldMarketConfig<T>,
+        vault: &SYVault<T>,
         receipt: FlashMintReceipt<T>,
-        payment: SYToken<T>,
+        mut payment: Coin<T>,
         ctx: &mut TxContext,
     ) {
         let FlashMintReceipt { sy_amount_owed, market_config_id, fee } = receipt;
 
-        let payment_amount = standardized_yield::sy_amount(&payment);
-        let total_owed = sy_amount_owed + fee;
+        // Convert SY owed to underlying amount
+        let total_sy_owed = sy_amount_owed + fee;
+        let underlying_owed = crux::fixed_point::from_wad(
+            crux::fixed_point::wad_mul(
+                crux::fixed_point::to_wad(total_sy_owed),
+                standardized_yield::exchange_rate(vault),
+            )
+        );
 
-        assert!(payment_amount >= total_owed, EInsufficientRepayment);
+        let payment_amount = payment.value();
+        assert!(payment_amount >= underlying_owed, EInsufficientRepayment);
+
+        // SECURITY: Refund excess payment
+        if (payment_amount > underlying_owed) {
+            let refund_coin = payment.split(underlying_owed, ctx);
+            // Transfer the remaining (excess) back to user
+            sui::transfer::public_transfer(payment, ctx.sender());
+            // Use the exact amount for deposit
+            yield_tokenizer::deposit_to_reserve(config, refund_coin);
+        } else {
+            // Exact payment — deposit all into config reserve
+            yield_tokenizer::deposit_to_reserve(config, payment);
+        };
 
         event::emit(FlashMintRepaid {
             market_config_id,
             borrower: ctx.sender(),
-            sy_repaid: payment_amount,
+            sy_repaid: total_sy_owed,
         });
-
-        // The SY payment backs the minted PT+YT.
-        // In full implementation, this would be deposited into the market's reserve.
-        // For now, freeze the SY as backing.
-        sui::transfer::public_freeze_object(payment);
     }
 
     /// Get the amount owed on a flash mint receipt
@@ -150,6 +171,12 @@ module crux::flash_mint {
     /// Get the fee on a flash mint receipt
     public fun receipt_fee<T>(receipt: &FlashMintReceipt<T>): u64 {
         receipt.fee
+    }
+
+    #[test_only]
+    /// Destroy a receipt in tests (e.g., expected_failure tests that abort before repayment)
+    public fun destroy_receipt_for_testing<T>(receipt: FlashMintReceipt<T>) {
+        let FlashMintReceipt { sy_amount_owed: _, market_config_id: _, fee: _ } = receipt;
     }
 
 }

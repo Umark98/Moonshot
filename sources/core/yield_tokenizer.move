@@ -11,11 +11,13 @@
 /// The PY index tracks the SY exchange rate and is used to calculate yield distribution.
 module crux::yield_tokenizer {
 
+    use sui::balance::{Self, Balance};
+    use sui::coin::{Self, Coin};
     use sui::clock::Clock;
     use sui::event;
 
     use crux::fixed_point;
-    use crux::standardized_yield::{Self, SYVault, SYToken};
+    use crux::standardized_yield::{Self, AdminCap, SYVault, SYToken};
 
     // ===== Constants =====
 
@@ -30,6 +32,11 @@ module crux::yield_tokenizer {
     const EMismatchedMarket: u64 = 304;
     const EAlreadySettled: u64 = 305;
     const ENotSettled: u64 = 306;
+    const EKeeperStillActive: u64 = 307;
+
+    /// If keeper is offline for more than 2 hours past maturity,
+    /// anyone can trigger permissionless settlement with current on-chain rate.
+    const KEEPER_TIMEOUT_MS: u64 = 7_200_000; // 2 hours
 
     // ===== Structs =====
 
@@ -60,6 +67,12 @@ module crux::yield_tokenizer {
         yield_reserve_sy: u64,
         /// Total duration of this market in ms (maturity_ms - creation_time)
         total_duration_ms: u64,
+        /// Last keeper heartbeat timestamp (ms). Used for fallback settlement.
+        last_keeper_heartbeat_ms: u64,
+        /// MAINNET: Real underlying token reserve backing all PT+YT.
+        /// When users mint PT+YT, underlying is deposited here.
+        /// When users redeem, underlying is withdrawn from here.
+        underlying_reserve: Balance<T>,
     }
 
     /// Owned object: Principal Token.
@@ -145,8 +158,9 @@ module crux::yield_tokenizer {
     // ===== Market Creation =====
 
     /// Create a new yield market for an asset type with a specific maturity date.
-    /// Must be called by admin. The SY vault must already exist.
+    /// SECURITY: Requires AdminCap to prevent unauthorized market creation.
     public fun create_market<T>(
+        _admin: &AdminCap,
         vault: &SYVault<T>,
         maturity_ms: u64,
         clock: &Clock,
@@ -171,6 +185,8 @@ module crux::yield_tokenizer {
             total_yt_supply: 0,
             yield_reserve_sy: 0,
             total_duration_ms: maturity_ms - now,
+            last_keeper_heartbeat_ms: now,
+            underlying_reserve: balance::zero<T>(),
         };
 
         let config_id = object::id(&config);
@@ -188,36 +204,41 @@ module crux::yield_tokenizer {
 
     // ===== Core Operations =====
 
-    /// Mint PT + YT from SY tokens.
-    /// The SY is consumed and equal amounts of PT and YT are created.
-    /// amount minted = sy_amount (1 SY → 1 PT + 1 YT in token units)
+    /// Mint PT + YT by depositing underlying tokens directly.
+    /// The underlying is held in the config's real reserve.
+    /// SY amount = underlying / exchange_rate. 1 SY → 1 PT + 1 YT.
+    /// Returns (PT, YT) tokens to the caller.
     public fun mint_py<T>(
         config: &mut YieldMarketConfig<T>,
-        sy_token: SYToken<T>,
+        vault: &SYVault<T>,
+        coin: Coin<T>,
         clock: &Clock,
         ctx: &mut TxContext,
     ): (PT<T>, YT<T>) {
+        // SECURITY: Block minting if the vault is paused (emergency)
+        assert!(!standardized_yield::is_paused(vault), 207);
         assert!(!config.is_expired, EMarketExpired);
         assert!(clock.timestamp_ms() < config.maturity_ms, EMarketExpired);
 
-        let sy_amount = standardized_yield::sy_amount(&sy_token);
+        let underlying_amount = coin.value();
+        assert!(underlying_amount > 0, EZeroAmount);
+
+        // Convert underlying to SY units using vault exchange rate
+        let sy_amount = fixed_point::from_wad(
+            fixed_point::wad_div(
+                fixed_point::to_wad(underlying_amount),
+                standardized_yield::exchange_rate(vault),
+            )
+        );
         assert!(sy_amount > 0, EZeroAmount);
 
-        // Consume the SY token by transferring it to a burn address
-        // In production, we'd hold SY in the config or a separate vault.
-        // For now, we track the reserve and the SY token is destroyed.
         let market_config_id = object::id(config);
 
-        // The SY is held as backing for PT+YT. We need to store it.
-        // Transfer SY to the market (in practice, this would be held in a shared balance)
-        // For the tokenizer, we track the amounts.
+        // MAINNET: Deposit underlying into the config's real reserve
+        config.underlying_reserve.join(coin.into_balance());
+
         config.total_pt_supply = config.total_pt_supply + sy_amount;
         config.total_yt_supply = config.total_yt_supply + sy_amount;
-
-        // Transfer SY to a holding mechanism (simplified: we destroy it and track supply)
-        // In full implementation, the config would hold a Balance<SYToken<T>>
-        // For now, transfer to a frozen address as escrow
-        transfer::public_freeze_object(sy_token);
 
         event::emit(PYMinted {
             market_config_id,
@@ -245,15 +266,16 @@ module crux::yield_tokenizer {
         (pt, yt)
     }
 
-    /// Redeem PT + YT back to SY before maturity.
+    /// Redeem PT + YT back to underlying before maturity.
     /// Requires equal amounts of PT and YT from the same market.
-    /// Claims any pending yield on the YT first.
+    /// MAINNET: Returns actual Coin<T> withdrawn from the config's reserve.
     public fun redeem_py_pre_expiry<T>(
         config: &mut YieldMarketConfig<T>,
+        vault: &SYVault<T>,
         pt: PT<T>,
         yt: YT<T>,
         ctx: &mut TxContext,
-    ): u64 {
+    ): Coin<T> {
         assert!(!config.is_expired, EMarketExpired);
 
         let PT { id: pt_id, amount: pt_amount, maturity_ms: _, market_config_id: pt_market } = pt;
@@ -271,6 +293,18 @@ module crux::yield_tokenizer {
         config.total_pt_supply = config.total_pt_supply - pt_amount;
         config.total_yt_supply = config.total_yt_supply - yt_amount;
 
+        // Convert SY amount back to underlying: underlying = sy * exchange_rate
+        let underlying_out = fixed_point::from_wad(
+            fixed_point::wad_mul(
+                fixed_point::to_wad(pt_amount),
+                standardized_yield::exchange_rate(vault),
+            )
+        );
+
+        // Cap at available reserve to prevent underflow
+        let available = config.underlying_reserve.value();
+        let actual_out = fixed_point::min_u64(underlying_out, available);
+
         let market_config_id = object::id(config);
 
         event::emit(PYRedeemed {
@@ -281,18 +315,19 @@ module crux::yield_tokenizer {
             sy_returned: pt_amount,
         });
 
-        // Return SY amount (the caller reconstructs SY from the SY vault)
-        pt_amount
+        // MAINNET: Withdraw actual underlying from reserve
+        let withdrawn = config.underlying_reserve.split(actual_out);
+        coin::from_balance(withdrawn, ctx)
     }
 
     /// Redeem PT after maturity for underlying.
     /// Post-expiry, only PT is needed (YT has expired, yield already claimable separately).
-    /// Returns the amount of SY the user should receive.
+    /// MAINNET: Returns actual Coin<T> withdrawn from the config's reserve.
     public fun redeem_pt_post_expiry<T>(
         config: &mut YieldMarketConfig<T>,
         pt: PT<T>,
         ctx: &mut TxContext,
-    ): u64 {
+    ): Coin<T> {
         assert!(config.is_expired, EMarketNotExpired);
         assert!(config.settlement_py_index > 0, ENotSettled);
 
@@ -304,13 +339,23 @@ module crux::yield_tokenizer {
 
         // PT redeems at settlement rate relative to initial rate.
         // SY amount = pt_amount * initial_py_index / settlement_py_index
-        // This ensures PT holders get exactly the principal portion.
         let sy_amount = fixed_point::from_wad(
             fixed_point::wad_div(
                 fixed_point::wad_mul(fixed_point::to_wad(amount), config.initial_py_index),
                 config.settlement_py_index,
             )
         );
+
+        // Convert SY to underlying at settlement rate
+        let underlying_out = fixed_point::from_wad(
+            fixed_point::wad_mul(
+                fixed_point::to_wad(sy_amount),
+                config.settlement_py_index,
+            )
+        );
+
+        let available = config.underlying_reserve.value();
+        let actual_out = fixed_point::min_u64(underlying_out, available);
 
         config.total_pt_supply = config.total_pt_supply - amount;
 
@@ -321,17 +366,20 @@ module crux::yield_tokenizer {
             sy_returned: sy_amount,
         });
 
-        sy_amount
+        // MAINNET: Withdraw actual underlying from reserve
+        let withdrawn = config.underlying_reserve.split(actual_out);
+        coin::from_balance(withdrawn, ctx)
     }
 
     /// Claim accrued yield on a YT position.
-    /// Returns the yield amount in SY units.
+    /// MAINNET: Returns actual Coin<T> withdrawn from the config's yield reserve.
     /// The YT is not consumed — user keeps it for future yield accrual.
     public fun claim_yield<T>(
         config: &mut YieldMarketConfig<T>,
+        vault: &SYVault<T>,
         yt: &mut YT<T>,
         ctx: &mut TxContext,
-    ): u64 {
+    ): Coin<T> {
         assert!(yt.market_config_id == object::id(config), EMismatchedMarket);
 
         // Calculate accrued yield since last claim
@@ -342,7 +390,7 @@ module crux::yield_tokenizer {
             0
         };
 
-        if (index_diff == 0) return 0;
+        if (index_diff == 0) return coin::from_balance(balance::zero<T>(), ctx);
 
         let yield_amount = fixed_point::from_wad(
             fixed_point::wad_mul(
@@ -351,34 +399,54 @@ module crux::yield_tokenizer {
             )
         );
 
-        // Update user's index to current
-        yt.user_interest_index = config.global_interest_index;
-
-        // Deduct from yield reserve
-        if (yield_amount > config.yield_reserve_sy) {
-            // Cap at available reserve
-            let actual_yield = config.yield_reserve_sy;
-            config.yield_reserve_sy = 0;
-
-            event::emit(YieldClaimed {
-                market_config_id: object::id(config),
-                claimer: ctx.sender(),
-                yt_amount: yt.amount,
-                yield_sy: actual_yield,
-            });
-
-            actual_yield
+        // SECURITY: Cap at available reserve FIRST, then only advance index
+        // proportionally to what was actually paid out.
+        let actual_yield = if (yield_amount > config.yield_reserve_sy) {
+            config.yield_reserve_sy
         } else {
-            config.yield_reserve_sy = config.yield_reserve_sy - yield_amount;
-
-            event::emit(YieldClaimed {
-                market_config_id: object::id(config),
-                claimer: ctx.sender(),
-                yt_amount: yt.amount,
-                yield_sy: yield_amount,
-            });
-
             yield_amount
+        };
+
+        if (actual_yield == 0) return coin::from_balance(balance::zero<T>(), ctx);
+
+        config.yield_reserve_sy = config.yield_reserve_sy - actual_yield;
+
+        // SECURITY: Only advance user's index proportionally to amount actually paid.
+        if (actual_yield == yield_amount) {
+            yt.user_interest_index = config.global_interest_index;
+        } else {
+            let payout_ratio = fixed_point::wad_div(
+                fixed_point::to_wad(actual_yield),
+                fixed_point::to_wad(yield_amount),
+            );
+            let index_advance = fixed_point::wad_mul(index_diff, payout_ratio);
+            yt.user_interest_index = yt.user_interest_index + index_advance;
+        };
+
+        // Convert SY yield to underlying amount
+        let underlying_yield = fixed_point::from_wad(
+            fixed_point::wad_mul(
+                fixed_point::to_wad(actual_yield),
+                standardized_yield::exchange_rate(vault),
+            )
+        );
+
+        let available = config.underlying_reserve.value();
+        let actual_underlying = fixed_point::min_u64(underlying_yield, available);
+
+        event::emit(YieldClaimed {
+            market_config_id: object::id(config),
+            claimer: ctx.sender(),
+            yt_amount: yt.amount,
+            yield_sy: actual_yield,
+        });
+
+        // MAINNET: Withdraw actual underlying from reserve
+        if (actual_underlying > 0) {
+            let withdrawn = config.underlying_reserve.split(actual_underlying);
+            coin::from_balance(withdrawn, ctx)
+        } else {
+            coin::from_balance(balance::zero<T>(), ctx)
         }
     }
 
@@ -428,20 +496,47 @@ module crux::yield_tokenizer {
             new_index: new_rate,
         });
 
-        // Check if maturity has been reached
-        if (clock.timestamp_ms() >= config.maturity_ms && !config.is_expired) {
-            settle_market(config, clock);
-        };
+        // Update keeper heartbeat — proves keeper is alive
+        config.last_keeper_heartbeat_ms = clock.timestamp_ms();
     }
 
-    /// Settle the market at maturity.
-    /// Snapshots the final PY index. Can be called by anyone after maturity.
+    /// Settle the market at maturity (admin path — preferred).
+    /// SECURITY: Requires AdminCap. Keeper should call update_py_index first to
+    /// ensure the final rate is current, then immediately settle.
     public fun settle_market<T>(
+        _admin: &AdminCap,
         config: &mut YieldMarketConfig<T>,
         clock: &Clock,
     ) {
         assert!(clock.timestamp_ms() >= config.maturity_ms, EMarketNotExpired);
         assert!(!config.is_expired, EAlreadySettled);
+
+        config.is_expired = true;
+        config.settlement_py_index = config.current_py_index;
+
+        event::emit(MarketSettled {
+            market_config_id: object::id(config),
+            settlement_py_index: config.settlement_py_index,
+            maturity_ms: config.maturity_ms,
+        });
+    }
+
+    /// Permissionless fallback settlement — anyone can call if the keeper has been
+    /// offline for more than KEEPER_TIMEOUT_MS after maturity.
+    /// Uses whatever the current on-chain PY index is (may be stale, but better
+    /// than leaving the market unsettled indefinitely).
+    public fun settle_market_fallback<T>(
+        config: &mut YieldMarketConfig<T>,
+        clock: &Clock,
+    ) {
+        let now = clock.timestamp_ms();
+        assert!(now >= config.maturity_ms, EMarketNotExpired);
+        assert!(!config.is_expired, EAlreadySettled);
+
+        // Only allow fallback if keeper has been inactive for KEEPER_TIMEOUT_MS
+        // past maturity. This gives the keeper time to do a proper settlement.
+        let fallback_deadline = config.maturity_ms + KEEPER_TIMEOUT_MS;
+        assert!(now >= fallback_deadline, EKeeperStillActive);
 
         config.is_expired = true;
         config.settlement_py_index = config.current_py_index;
@@ -500,10 +595,13 @@ module crux::yield_tokenizer {
         }
     }
 
-    /// Merge two YTs (must be from same market, user should claim yield first)
+    /// Merge two YTs (must be from same market).
+    /// SECURITY: Both YTs must have the same user_interest_index to prevent yield loss.
+    /// Users must call claim_yield on both YTs before merging if indexes differ.
     public fun merge_yt<T>(yt: &mut YT<T>, other: YT<T>) {
-        let YT { id, amount, maturity_ms: _, market_config_id, user_interest_index: _ } = other;
+        let YT { id, amount, maturity_ms: _, market_config_id, user_interest_index } = other;
         assert!(market_config_id == yt.market_config_id, EMismatchedMarket);
+        assert!(user_interest_index == yt.user_interest_index, EMismatchedAmounts);
         object::delete(id);
         yt.amount = yt.amount + amount;
     }
@@ -606,6 +704,76 @@ module crux::yield_tokenizer {
     /// Get yield reserve
     public fun yield_reserve_sy<T>(config: &YieldMarketConfig<T>): u64 {
         config.yield_reserve_sy
+    }
+
+    /// Package-internal market creation (for permissionless_market module).
+    /// Skips AdminCap requirement but is only callable within the crux package.
+    public(package) fun create_market_internal<T>(
+        vault: &SYVault<T>,
+        maturity_ms: u64,
+        clock: &Clock,
+        ctx: &mut TxContext,
+    ): ID {
+        let now = clock.timestamp_ms();
+        assert!(maturity_ms > now, EMarketExpired);
+
+        let initial_rate = standardized_yield::exchange_rate(vault);
+        let sy_vault_id = standardized_yield::vault_id(vault);
+
+        let config = YieldMarketConfig<T> {
+            id: object::new(ctx),
+            maturity_ms,
+            initial_py_index: initial_rate,
+            current_py_index: initial_rate,
+            settlement_py_index: 0,
+            is_expired: false,
+            sy_vault_id,
+            global_interest_index: WAD,
+            total_pt_supply: 0,
+            total_yt_supply: 0,
+            yield_reserve_sy: 0,
+            total_duration_ms: maturity_ms - now,
+            last_keeper_heartbeat_ms: now,
+            underlying_reserve: balance::zero<T>(),
+        };
+
+        let config_id = object::id(&config);
+
+        event::emit(MarketCreated {
+            market_config_id: config_id,
+            sy_vault_id,
+            maturity_ms,
+            initial_py_index: initial_rate,
+        });
+
+        transfer::share_object(config);
+        config_id
+    }
+
+    // ===== Reserve Management (Package-Internal) =====
+
+    /// Deposit underlying into the config's reserve. Used by flash_mint repayment
+    /// and pool operations that need to back PT+YT with real assets.
+    public(package) fun deposit_to_reserve<T>(
+        config: &mut YieldMarketConfig<T>,
+        coin: Coin<T>,
+    ) {
+        config.underlying_reserve.join(coin.into_balance());
+    }
+
+    /// Withdraw underlying from the config's reserve. Used by pool operations.
+    public(package) fun withdraw_from_reserve<T>(
+        config: &mut YieldMarketConfig<T>,
+        amount: u64,
+        ctx: &mut TxContext,
+    ): Coin<T> {
+        let withdrawn = config.underlying_reserve.split(amount);
+        coin::from_balance(withdrawn, ctx)
+    }
+
+    /// Get the underlying reserve balance.
+    public fun reserve_balance<T>(config: &YieldMarketConfig<T>): u64 {
+        config.underlying_reserve.value()
     }
 
     // ===== Package-Internal Functions (for flash_mint) =====

@@ -17,6 +17,13 @@ module crux::rate_swap {
 
     use crux::fixed_point;
 
+    // ===== Admin =====
+
+    /// Admin capability for rate swap settlement authorization
+    public struct AdminCap has key, store {
+        id: UID,
+    }
+
     // ===== Constants =====
 
     /// Minimum collateral ratio: 10% of notional (0.1 * WAD)
@@ -247,7 +254,7 @@ module crux::rate_swap {
 
     /// Settle a matured swap contract.
     ///
-    /// Can be called by anyone once `clock.timestamp_ms() >= swap.maturity_ms`.
+    /// SECURITY: Requires AdminCap — only trusted oracle/keeper can supply the rate.
     /// Computes net PnL for each party:
     ///
     ///   net = (variable_rate - fixed_rate) * notional / WAD
@@ -255,9 +262,9 @@ module crux::rate_swap {
     /// If `net > 0` the fixed-rate payer profits (variable exceeded fixed);
     /// if `net < 0` the variable-rate payer profits (fixed exceeded variable).
     ///
-    /// PnL magnitudes are recorded in the `SwapSettled` event.
-    /// Actual collateral transfer is tracked off-chain or via a downstream module.
+    /// Rate is capped at 10x (1000%) to bound manipulation risk even with admin compromise.
     public fun settle_swap(
+        _admin: &AdminCap,
         swap: &mut SwapContract,
         actual_variable_rate_wad: u128,
         clock: &Clock,
@@ -265,21 +272,29 @@ module crux::rate_swap {
         assert!(clock.timestamp_ms() >= swap.maturity_ms, ESwapNotExpired);
         assert!(!swap.is_settled, EAlreadySettled);
 
-        swap.settlement_rate_wad = actual_variable_rate_wad;
+        // SECURITY: Cap variable rate at 10x (1000% APY) to bound manipulation
+        let max_rate_wad: u128 = 10_000_000_000_000_000_000; // 10 * WAD
+        let capped_rate = if (actual_variable_rate_wad > max_rate_wad) {
+            max_rate_wad
+        } else {
+            actual_variable_rate_wad
+        };
+
+        swap.settlement_rate_wad = capped_rate;
         swap.is_settled = true;
 
         // Net settlement amount = |variable_rate - fixed_rate| * notional / WAD
         let (fixed_payer_pnl, variable_payer_pnl) =
-            if (actual_variable_rate_wad >= swap.fixed_rate_wad) {
+            if (capped_rate >= swap.fixed_rate_wad) {
                 // Variable exceeded fixed: fixed payer receives the difference.
-                let rate_diff = actual_variable_rate_wad - swap.fixed_rate_wad;
+                let rate_diff = capped_rate - swap.fixed_rate_wad;
                 let pnl = fixed_point::from_wad(
                     fixed_point::wad_mul(rate_diff, fixed_point::to_wad(swap.notional_amount))
                 );
                 (pnl, 0u64)
             } else {
                 // Fixed exceeded variable: variable payer receives the difference.
-                let rate_diff = swap.fixed_rate_wad - actual_variable_rate_wad;
+                let rate_diff = swap.fixed_rate_wad - capped_rate;
                 let pnl = fixed_point::from_wad(
                     fixed_point::wad_mul(rate_diff, fixed_point::to_wad(swap.notional_amount))
                 );
@@ -290,7 +305,7 @@ module crux::rate_swap {
 
         event::emit(SwapSettled {
             swap_id,
-            settlement_rate_wad: actual_variable_rate_wad,
+            settlement_rate_wad: capped_rate,
             fixed_payer_pnl,
             variable_payer_pnl,
         });
@@ -337,5 +352,22 @@ module crux::rate_swap {
     /// Return whether a swap contract has been settled.
     public fun is_settled(swap: &SwapContract): bool {
         swap.is_settled
+    }
+
+    // ===== Init =====
+
+    /// Create the admin capability (called once at package publish)
+    fun init(ctx: &mut TxContext) {
+        transfer::transfer(
+            AdminCap { id: object::new(ctx) },
+            ctx.sender(),
+        );
+    }
+
+    // ===== Test Helpers =====
+
+    #[test_only]
+    public fun init_for_testing(ctx: &mut TxContext) {
+        init(ctx);
     }
 }

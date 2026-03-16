@@ -28,6 +28,10 @@ module crux::ve_staking {
     const EPositionNotFound: u64  = 963;
     const ENotPositionOwner: u64  = 964;
     const EZeroAmount: u64        = 965;
+    const ETooManyPositions: u64  = 966;
+
+    /// SECURITY: Maximum positions to prevent DoS via linear scan
+    const MAX_POSITIONS: u64 = 10_000;
 
     // ===== Structs =====
 
@@ -114,6 +118,7 @@ module crux::ve_staking {
     ): VeToken {
         let locked_amount = coin.value();
         assert!(locked_amount > 0, EZeroAmount);
+        assert!(pool.positions.length() < MAX_POSITIONS, ETooManyPositions);
         assert!(lock_duration_ms >= MIN_LOCK_MS, ELockTooShort);
         assert!(lock_duration_ms <= MAX_LOCK_MS, ELockTooLong);
 
@@ -192,17 +197,19 @@ module crux::ve_staking {
 
     /// Extend an existing lock to a later end timestamp.
     /// `new_end_ms` must be strictly after the current `lock_end_ms`.
-    /// Recomputes and updates ve_amount_wad accordingly.
+    /// SECURITY: Verifies caller is the position owner.
     public fun extend_lock(
         pool: &mut VeStakingPool,
         ve_token: &VeToken,
         new_end_ms: u64,
         clock: &Clock,
+        ctx: &TxContext,
     ) {
         let (found, idx) = find_position_index(pool, ve_token.position_id);
         assert!(found, EPositionNotFound);
 
         let position = &mut pool.positions[idx];
+        assert!(position.owner == ctx.sender(), ENotPositionOwner);
 
         // New end must be further in the future than the current end.
         assert!(new_end_ms > position.lock_end_ms, ELockTooShort);
@@ -251,6 +258,11 @@ module crux::ve_staking {
         let (found, idx) = find_position_index(pool, position_id);
         assert!(found, EPositionNotFound);
         pool.positions[idx].lock_end_ms
+    }
+
+    /// Get the position ID from a VeToken (used by governor for vote weight lookup)
+    public fun ve_token_position_id(ve_token: &VeToken): u64 {
+        ve_token.position_id
     }
 
     // ===== Internal Helpers =====

@@ -112,9 +112,9 @@ module crux::fee_collector {
         let total = vault.pending_fees.value();
         assert!(total > 0, EInsufficientFees);
 
-        // Calculate shares
+        // Calculate shares — treasury gets remainder to prevent dust accumulation
         let staker_amount = ((total as u128) * STAKER_SHARE_WAD / WAD as u64);
-        let treasury_amount = total - staker_amount;
+        let treasury_amount = total - staker_amount; // Includes rounding remainder
 
         // Send treasury share
         if (treasury_amount > 0) {

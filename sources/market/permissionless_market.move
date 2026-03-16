@@ -124,8 +124,8 @@ module crux::permissionless_market {
             i = i + 1;
         };
 
-        // Create the yield market via yield_tokenizer
-        let market_config_id = yield_tokenizer::create_market(vault, maturity_ms, clock, ctx);
+        // Create the yield market via yield_tokenizer (package-internal, no AdminCap needed)
+        let market_config_id = yield_tokenizer::create_market_internal(vault, maturity_ms, clock, ctx);
 
         // Register the new market
         let entry = MarketEntry {

@@ -13,6 +13,8 @@
 ///   - Time-decay: curve flattens as maturity approaches
 module crux::rate_market {
 
+    use sui::balance::{Self, Balance};
+    use sui::coin::{Self, Coin};
     use sui::clock::Clock;
     use sui::event;
 
@@ -56,10 +58,14 @@ module crux::rate_market {
     /// Holds PT and SY reserves and facilitates trading.
     public struct YieldPool<phantom T> has key {
         id: UID,
-        /// PT reserves in the pool
+        /// PT reserves in the pool (virtual — PT is created/burned by tokenizer)
         pt_reserve: u64,
-        /// SY reserves in the pool (tracked as amount, actual SY held separately)
+        /// SY reserves in the pool (virtual amount tracking)
         sy_reserve: u64,
+        /// MAINNET: Real underlying tokens backing the SY side of the pool.
+        /// When LP deposits SY, the underlying goes here.
+        /// When a trader swaps PT→SY, underlying is withdrawn from here.
+        underlying_balance: Balance<T>,
         /// AMM curve parameter: controls rate sensitivity
         scalar_root: u128,
         /// Fee rate (WAD-scaled, e.g., 0.003 * WAD = 0.3%)
@@ -137,21 +143,22 @@ module crux::rate_market {
     // ===== Pool Creation =====
 
     /// Create a new yield pool for a (underlying, maturity) pair.
-    /// Requires initial liquidity deposit of both PT and SY.
+    /// MAINNET: Requires initial underlying deposit. PT side is tracked virtually.
+    /// The SY side is backed by real underlying in the pool's Balance<T>.
+    /// The PT side is backed by the YieldMarketConfig's reserve (via mint_py deposits).
     public fun create_pool<T>(
-        config: &YieldMarketConfig<T>,
-        initial_pt: PT<T>,
-        initial_sy: SYToken<T>,
+        config: &mut YieldMarketConfig<T>,
+        vault: &SYVault<T>,
+        initial_underlying: Coin<T>,
+        pt_amount: u64,
+        sy_amount: u64,
         clock: &Clock,
         ctx: &mut TxContext,
     ): LPToken<T> {
         let maturity = yield_tokenizer::maturity_ms(config);
         assert!(clock.timestamp_ms() < maturity, EPoolExpired);
-
-        let pt_amount = yield_tokenizer::pt_amount(&initial_pt);
-        let sy_amount = standardized_yield::sy_amount(&initial_sy);
-
         assert!(pt_amount > 0 && sy_amount > 0, EZeroAmount);
+        assert!(initial_underlying.value() > 0, EZeroAmount);
 
         let market_config_id = yield_tokenizer::market_config_id(config);
         let sy_vault_id = yield_tokenizer::sy_vault_id(config);
@@ -178,10 +185,12 @@ module crux::rate_market {
             cumulative_ln_rate: 0,
         };
 
+        // MAINNET: Deposit underlying into pool's real balance
         let pool = YieldPool<T> {
             id: object::new(ctx),
             pt_reserve: pt_amount,
             sy_reserve: sy_amount,
+            underlying_balance: initial_underlying.into_balance(),
             scalar_root: DEFAULT_SCALAR_ROOT,
             fee_rate: DEFAULT_FEE_RATE,
             current_implied_rate: initial_rate,
@@ -207,10 +216,6 @@ module crux::rate_market {
             initial_sy_reserve: sy_amount,
         });
 
-        // Freeze the initial PT and SY as pool backing
-        transfer::public_freeze_object(initial_pt);
-        transfer::public_freeze_object(initial_sy);
-
         transfer::share_object(pool);
 
         LPToken<T> {
@@ -222,12 +227,14 @@ module crux::rate_market {
 
     // ===== Swap Operations =====
 
-    /// Swap SY for PT (user wants fixed-rate exposure).
-    /// Returns the newly created PT token.
+    /// Swap underlying (representing SY value) for PT (user wants fixed-rate exposure).
+    /// MAINNET: User deposits Coin<T>, pool gives back PT from virtual reserve.
+    /// The underlying is held in the pool's real balance.
     public fun swap_sy_for_pt<T>(
         pool: &mut YieldPool<T>,
+        vault: &SYVault<T>,
         config: &mut YieldMarketConfig<T>,
-        sy_in: SYToken<T>,
+        coin_in: Coin<T>,
         min_pt_out: u64,
         clock: &Clock,
         ctx: &mut TxContext,
@@ -236,8 +243,16 @@ module crux::rate_market {
         let now = clock.timestamp_ms();
         assert!(now < pool.maturity_ms, EPoolExpired);
 
-        let sy_amount = standardized_yield::sy_amount(&sy_in);
-        assert!(sy_amount > 0, EZeroAmount);
+        let underlying_amount = coin_in.value();
+        assert!(underlying_amount > 0, EZeroAmount);
+
+        // Convert underlying to SY units for AMM calculation
+        let sy_amount = fixed_point::from_wad(
+            fixed_point::wad_div(
+                fixed_point::to_wad(underlying_amount),
+                standardized_yield::exchange_rate(vault),
+            )
+        );
 
         let time_to_maturity = pool.maturity_ms - now;
 
@@ -261,20 +276,20 @@ module crux::rate_market {
             0, pool.scalar_root, time_to_maturity, pool.total_duration_ms,
         );
         let total_fee = if (gross_output > pt_out) { gross_output - pt_out } else { 0 };
-        let protocol_fee = total_fee / 5; // 20% to protocol
+        let protocol_fee = total_fee / 5;
         pool.protocol_fees_pt = pool.protocol_fees_pt + protocol_fee;
 
-        // Update reserves
+        // Update virtual reserves
         pool.sy_reserve = pool.sy_reserve + sy_amount;
         pool.pt_reserve = pool.pt_reserve - pt_out;
+
+        // MAINNET: Deposit real underlying into pool balance
+        pool.underlying_balance.join(coin_in.into_balance());
 
         // Update implied rate
         let new_rate = calc_implied_rate(pool, now);
         update_twap(pool, new_rate, now);
         pool.current_implied_rate = new_rate;
-
-        // Burn the SY input (consumed by pool)
-        let _burned = standardized_yield::burn_sy_internal(sy_in);
 
         let pool_id = object::id(pool);
         event::emit(Swapped {
@@ -292,17 +307,17 @@ module crux::rate_market {
         yield_tokenizer::create_pt_internal(config, pt_out, ctx)
     }
 
-    /// Swap PT for SY (user wants to exit fixed-rate position).
-    /// Returns the newly created SY token.
+    /// Swap PT for underlying (user wants to exit fixed-rate position).
+    /// MAINNET: User gives PT, pool returns Coin<T> from real balance.
     public fun swap_pt_for_sy<T>(
         pool: &mut YieldPool<T>,
-        vault: &mut SYVault<T>,
+        vault: &SYVault<T>,
         config: &mut YieldMarketConfig<T>,
         pt_in: PT<T>,
-        min_sy_out: u64,
+        min_underlying_out: u64,
         clock: &Clock,
         ctx: &mut TxContext,
-    ): SYToken<T> {
+    ): Coin<T> {
         assert!(pool.is_active, EPoolExpired);
         let now = clock.timestamp_ms();
         assert!(now < pool.maturity_ms, EPoolExpired);
@@ -312,7 +327,7 @@ module crux::rate_market {
 
         let time_to_maturity = pool.maturity_ms - now;
 
-        // Calculate output
+        // Calculate SY output
         let sy_out = amm_math::calc_swap_pt_for_sy(
             pool.pt_reserve,
             pool.sy_reserve,
@@ -323,8 +338,16 @@ module crux::rate_market {
             pool.total_duration_ms,
         );
 
-        assert!(sy_out >= min_sy_out, ESlippageExceeded);
-        assert!(sy_out < pool.sy_reserve, EInsufficientLiquidity);
+        // Convert SY output to underlying for the actual withdrawal
+        let underlying_out = fixed_point::from_wad(
+            fixed_point::wad_mul(
+                fixed_point::to_wad(sy_out),
+                standardized_yield::exchange_rate(vault),
+            )
+        );
+
+        assert!(underlying_out >= min_underlying_out, ESlippageExceeded);
+        assert!(underlying_out <= pool.underlying_balance.value(), EInsufficientLiquidity);
 
         // Calculate protocol fee
         let gross_output = amm_math::calc_swap_pt_for_sy(
@@ -335,7 +358,7 @@ module crux::rate_market {
         let protocol_fee = total_fee / 5;
         pool.protocol_fees_sy = pool.protocol_fees_sy + protocol_fee;
 
-        // Update reserves
+        // Update virtual reserves
         pool.pt_reserve = pool.pt_reserve + pt_amount;
         pool.sy_reserve = pool.sy_reserve - sy_out;
 
@@ -359,27 +382,29 @@ module crux::rate_market {
             fee: total_fee,
         });
 
-        // Create and return SY token for the user
-        standardized_yield::create_sy_internal(vault, sy_out, ctx)
+        // MAINNET: Withdraw real underlying from pool balance
+        let withdrawn = pool.underlying_balance.split(underlying_out);
+        coin::from_balance(withdrawn, ctx)
     }
 
     // ===== Liquidity Operations =====
 
-    /// Add liquidity to the pool with PT and SY.
+    /// Add liquidity to the pool with underlying tokens.
+    /// MAINNET: Underlying is deposited into pool's real balance.
     /// Returns LP tokens proportional to the deposit relative to existing reserves.
     public fun add_liquidity<T>(
         pool: &mut YieldPool<T>,
-        pt: PT<T>,
-        sy: SYToken<T>,
+        vault: &SYVault<T>,
+        underlying: Coin<T>,
+        pt_amount: u64,
+        sy_amount: u64,
         clock: &Clock,
         ctx: &mut TxContext,
     ): LPToken<T> {
         assert!(pool.is_active, EPoolExpired);
         assert!(clock.timestamp_ms() < pool.maturity_ms, EPoolExpired);
-
-        let pt_amount = yield_tokenizer::pt_amount(&pt);
-        let sy_amount = standardized_yield::sy_amount(&sy);
         assert!(pt_amount > 0 && sy_amount > 0, EZeroAmount);
+        assert!(underlying.value() > 0, EZeroAmount);
 
         let lp_amount = amm_math::calc_lp_tokens_to_mint(
             pt_amount, sy_amount,
@@ -387,14 +412,13 @@ module crux::rate_market {
             pool.total_lp_supply,
         );
 
-        // Update reserves
+        // Update virtual reserves
         pool.pt_reserve = pool.pt_reserve + pt_amount;
         pool.sy_reserve = pool.sy_reserve + sy_amount;
         pool.total_lp_supply = pool.total_lp_supply + lp_amount;
 
-        // Freeze deposited assets
-        transfer::public_freeze_object(pt);
-        transfer::public_freeze_object(sy);
+        // MAINNET: Deposit real underlying into pool balance
+        pool.underlying_balance.join(underlying.into_balance());
 
         let pool_id = object::id(pool);
         event::emit(LiquidityAdded {
@@ -413,12 +437,14 @@ module crux::rate_market {
     }
 
     /// Remove liquidity by burning LP tokens.
-    /// Returns the proportional PT and SY amounts.
+    /// MAINNET: Returns actual Coin<T> withdrawn from pool's real balance.
+    /// PT side is virtual — the PT claim is tracked by the tokenizer.
     public fun remove_liquidity<T>(
         pool: &mut YieldPool<T>,
+        vault: &SYVault<T>,
         lp: LPToken<T>,
         ctx: &mut TxContext,
-    ): (u64, u64) {
+    ): Coin<T> {
         let LPToken { id, amount: lp_amount, pool_id: _ } = lp;
         object::delete(id);
 
@@ -432,7 +458,17 @@ module crux::rate_market {
             pool.total_lp_supply,
         );
 
-        // Update reserves
+        // Convert SY output to underlying
+        let underlying_out = fixed_point::from_wad(
+            fixed_point::wad_mul(
+                fixed_point::to_wad(sy_out),
+                standardized_yield::exchange_rate(vault),
+            )
+        );
+        let available = pool.underlying_balance.value();
+        let actual_out = fixed_point::min_u64(underlying_out, available);
+
+        // Update virtual reserves
         pool.pt_reserve = pool.pt_reserve - pt_out;
         pool.sy_reserve = pool.sy_reserve - sy_out;
         pool.total_lp_supply = pool.total_lp_supply - lp_amount;
@@ -446,7 +482,9 @@ module crux::rate_market {
             sy_withdrawn: sy_out,
         });
 
-        (pt_out, sy_out)
+        // MAINNET: Withdraw real underlying from pool balance
+        let withdrawn = pool.underlying_balance.split(actual_out);
+        coin::from_balance(withdrawn, ctx)
     }
 
     // ===== TWAP Oracle =====
@@ -608,5 +646,18 @@ module crux::rate_market {
             pool.fee_rate, pool.scalar_root,
             time_to_maturity, pool.total_duration_ms,
         )
+    }
+
+    // ===== Emergency Functions =====
+
+    /// SECURITY: Emergency pause — deactivate a pool to halt all swaps and liquidity ops.
+    /// Only callable within the crux package (admin-gated at higher level).
+    public(package) fun emergency_pause_pool<T>(pool: &mut YieldPool<T>) {
+        pool.is_active = false;
+    }
+
+    /// Reactivate a paused pool.
+    public(package) fun unpause_pool<T>(pool: &mut YieldPool<T>) {
+        pool.is_active = true;
     }
 }

@@ -25,30 +25,45 @@ module crux::fixed_point {
     /// Returns the WAD constant (1e18)
     public fun wad(): u128 { WAD }
 
+    /// Maximum u128 value for overflow checks
+    const MAX_U128: u256 = 340_282_366_920_938_463_463_374_607_431_768_211_455;
+
     /// Multiply two WAD values: (a * b) / WAD, rounded down.
     /// Uses u256 intermediate to prevent overflow.
+    /// SECURITY: Asserts result fits in u128.
     public fun wad_mul(a: u128, b: u128): u128 {
-        (((a as u256) * (b as u256) / (WAD as u256)) as u128)
+        let result = (a as u256) * (b as u256) / (WAD as u256);
+        assert!(result <= MAX_U128, EOverflow);
+        (result as u128)
     }
 
     /// Multiply two WAD values: (a * b + HALF_WAD) / WAD, rounded to nearest.
     /// Uses u256 intermediate to prevent overflow.
+    /// SECURITY: Asserts result fits in u128.
     public fun wad_mul_round(a: u128, b: u128): u128 {
-        ((((a as u256) * (b as u256) + (HALF_WAD as u256)) / (WAD as u256)) as u128)
+        let result = ((a as u256) * (b as u256) + (HALF_WAD as u256)) / (WAD as u256);
+        assert!(result <= MAX_U128, EOverflow);
+        (result as u128)
     }
 
     /// Divide two WAD values: (a * WAD) / b, rounded down.
     /// Uses u256 intermediate to prevent overflow.
+    /// SECURITY: Asserts result fits in u128.
     public fun wad_div(a: u128, b: u128): u128 {
         assert!(b > 0, EDivisionByZero);
-        (((a as u256) * (WAD as u256) / (b as u256)) as u128)
+        let result = (a as u256) * (WAD as u256) / (b as u256);
+        assert!(result <= MAX_U128, EOverflow);
+        (result as u128)
     }
 
     /// Divide two WAD values: (a * WAD + b/2) / b, rounded to nearest.
     /// Uses u256 intermediate to prevent overflow.
+    /// SECURITY: Asserts result fits in u128.
     public fun wad_div_round(a: u128, b: u128): u128 {
         assert!(b > 0, EDivisionByZero);
-        ((((a as u256) * (WAD as u256) + ((b / 2) as u256)) / (b as u256)) as u128)
+        let result = ((a as u256) * (WAD as u256) + ((b / 2) as u256)) / (b as u256);
+        assert!(result <= MAX_U128, EOverflow);
+        (result as u128)
     }
 
     // ===== Conversion =====
@@ -68,6 +83,13 @@ module crux::fixed_point {
     /// Convert WAD back to u64, rounding to nearest
     public fun from_wad_round(wad_amount: u128): u64 {
         let result = (wad_amount + HALF_WAD) / WAD;
+        assert!(result <= MAX_U64, EOverflow);
+        (result as u64)
+    }
+
+    /// Convert WAD back to u64, rounding up (ceiling division)
+    public fun from_wad_round_up(wad_amount: u128): u64 {
+        let result = (wad_amount + WAD - 1) / WAD;
         assert!(result <= MAX_U64, EOverflow);
         (result as u64)
     }

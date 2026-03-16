@@ -25,6 +25,11 @@ module crux::standardized_yield {
     const EInsufficientBalance: u64 = 202;
     const EVaultPaused: u64 = 203;
     const EInvalidExchangeRate: u64 = 204;
+    const ERateIncreaseTooLarge: u64 = 205;
+    const EInsolvencyDetected: u64 = 206;
+
+    /// SECURITY: Maximum rate increase per update — 10% (prevents admin key abuse)
+    const MAX_RATE_INCREASE_WAD: u128 = 100_000_000_000_000_000; // 0.10 * WAD
 
     // ===== Structs =====
 
@@ -85,6 +90,14 @@ module crux::standardized_yield {
         timestamp_ms: u64,
     }
 
+    public struct VaultPaused has copy, drop {
+        vault_id: ID,
+    }
+
+    public struct VaultUnpaused has copy, drop {
+        vault_id: ID,
+    }
+
     // ===== Init =====
 
     /// Create the admin capability (called once at package publish)
@@ -137,6 +150,9 @@ module crux::standardized_yield {
                 vault.exchange_rate,
             )
         );
+
+        // SECURITY: Prevent dust deposits that round to 0 SY, trapping underlying
+        assert!(sy_amount > 0, EZeroDeposit);
 
         // Take underlying into vault
         let coin_balance = coin.into_balance();
@@ -208,12 +224,19 @@ module crux::standardized_yield {
 
     /// Update the exchange rate based on yield accrued in the underlying protocol.
     /// The new rate must be >= the old rate (monotonically non-decreasing).
-    /// This is called by the keeper bot or anyone who wants to trigger an update.
-    ///
-    /// In production, the new_rate would be computed by reading the underlying
-    /// protocol's state (e.g., Suilend's cToken exchange rate, Haedal's haSUI rate).
-    /// For now, the adapter passes the new rate.
+    /// SECURITY: Requires AdminCap to prevent unauthorized rate manipulation.
     public fun update_exchange_rate<T>(
+        _admin: &AdminCap,
+        vault: &mut SYVault<T>,
+        new_rate: u128,
+        clock: &Clock,
+    ) {
+        update_exchange_rate_internal(vault, new_rate, clock);
+    }
+
+    /// Package-internal rate update for trusted adapter modules.
+    /// Adapters call this to propagate rates from underlying protocols.
+    public(package) fun update_exchange_rate_internal<T>(
         vault: &mut SYVault<T>,
         new_rate: u128,
         clock: &Clock,
@@ -224,6 +247,10 @@ module crux::standardized_yield {
         let old_rate = vault.exchange_rate;
 
         if (new_rate > old_rate) {
+            // SECURITY: Cap maximum rate increase per update to prevent manipulation
+            // Max increase is 10% of current rate per call
+            let max_allowed = old_rate + fixed_point::wad_mul(old_rate, MAX_RATE_INCREASE_WAD);
+            assert!(new_rate <= max_allowed, ERateIncreaseTooLarge);
             let vault_id = object::id(vault);
             vault.exchange_rate = new_rate;
             vault.last_update_ms = clock.timestamp_ms();
@@ -280,6 +307,7 @@ module crux::standardized_yield {
         vault: &mut SYVault<T>,
     ) {
         vault.is_paused = true;
+        event::emit(VaultPaused { vault_id: object::id(vault) });
     }
 
     /// Unpause the vault
@@ -288,6 +316,7 @@ module crux::standardized_yield {
         vault: &mut SYVault<T>,
     ) {
         vault.is_paused = false;
+        event::emit(VaultUnpaused { vault_id: object::id(vault) });
     }
 
     // ===== View Functions =====
@@ -327,6 +356,19 @@ module crux::standardized_yield {
         vault.is_paused
     }
 
+    /// SECURITY: Check vault solvency — underlying balance must cover all outstanding SY.
+    /// Returns true if vault is solvent (underlying >= total_sy * exchange_rate).
+    public fun is_solvent<T>(vault: &SYVault<T>): bool {
+        if (vault.total_sy_supply == 0) return true;
+        let required_underlying = fixed_point::from_wad(
+            fixed_point::wad_mul(
+                fixed_point::to_wad(vault.total_sy_supply),
+                vault.exchange_rate,
+            )
+        );
+        vault.underlying_balance.value() >= required_underlying
+    }
+
     /// Calculate how many SY tokens a given underlying amount would mint
     public fun preview_deposit<T>(vault: &SYVault<T>, underlying_amount: u64): u64 {
         fixed_point::from_wad(
@@ -341,11 +383,19 @@ module crux::standardized_yield {
 
     /// Create an SY token. Only callable by modules within the crux package.
     /// Used by the AMM when swapping PT → SY (pool needs to issue SY to the trader).
+    /// SECURITY: Updates total_sy_supply and verifies vault solvency post-creation.
+    /// The new SY supply must not exceed what the vault can back with underlying.
     public(package) fun create_sy_internal<T>(
         vault: &mut SYVault<T>,
         amount: u64,
         ctx: &mut TxContext,
     ): SYToken<T> {
+        vault.total_sy_supply = vault.total_sy_supply + amount;
+
+        // SECURITY: Verify vault remains solvent after creating new SY.
+        // This prevents the AMM from issuing more SY than the vault can redeem.
+        assert!(is_solvent(vault), EInsolvencyDetected);
+
         SYToken<T> {
             id: object::new(ctx),
             amount,
@@ -354,11 +404,14 @@ module crux::standardized_yield {
     }
 
     /// Burn an SY token and reduce supply. Only callable within the package.
+    /// SECURITY: Updates total_sy_supply to maintain accurate accounting.
     public(package) fun burn_sy_internal<T>(
+        vault: &mut SYVault<T>,
         sy_token: SYToken<T>,
     ): u64 {
         let SYToken { id, amount, vault_id: _ } = sy_token;
         object::delete(id);
+        vault.total_sy_supply = vault.total_sy_supply - amount;
         amount
     }
 
@@ -367,6 +420,16 @@ module crux::standardized_yield {
     #[test_only]
     public fun init_for_testing(ctx: &mut TxContext) {
         init(ctx);
+    }
+
+    #[test_only]
+    /// Test helper: update exchange rate without AdminCap
+    public fun update_exchange_rate_for_testing<T>(
+        vault: &mut SYVault<T>,
+        new_rate: u128,
+        clock: &Clock,
+    ) {
+        update_exchange_rate_internal(vault, new_rate, clock);
     }
 
     /// Calculate how much underlying a given SY amount would redeem
