@@ -11,13 +11,14 @@ import {
   DatabaseZap,
   CheckCircle2,
 } from "lucide-react";
-import { PACKAGE_ID } from "@/lib/constants";
+import { PACKAGE_ID, SUPPORTED_ASSETS } from "@/lib/constants";
 import { StatCard } from "@/components/ui/StatCard";
 import { MarketRow } from "@/components/ui/MarketRow";
 import { YieldCurveChart } from "@/components/charts/YieldCurveChart";
+import { TvlChart } from "@/components/charts/TvlChart";
 import { useMarkets, useYieldCurve, useProtocolStats } from "@/hooks/useMarkets";
+import { useDailyStats } from "@/hooks/useAnalytics";
 import { useState } from "react";
-import { SUPPORTED_ASSETS } from "@/lib/constants";
 
 const stagger = {
   hidden: {},
