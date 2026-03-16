@@ -1,0 +1,22 @@
+{
+  "name": "crux-keeper",
+  "version": "0.2.0",
+  "description": "Crux Protocol keeper bot — syncs rates, settles maturities, snapshots analytics",
+  "main": "src/index.ts",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "npx tsx src/index.ts"
+  },
+  "dependencies": {
+    "@mysten/sui": "^1.0.0",
+    "@prisma/client": "^6.19.0",
+    "dotenv": "^16.4.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "tsx": "^4.7.0",
+    "prisma": "^6.19.0",
+    "@types/node": "^20.0.0"
+  }
+}

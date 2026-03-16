@@ -1,0 +1,9 @@
+[package]
+name = "crux"
+edition = "2024.beta"
+
+[dependencies]
+Sui = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-framework", rev = "framework/testnet" }
+
+[addresses]
+crux = "0x1e07b1f952d66f479773589f2930ae99d4038fa46844abdb2e496bbc8b0c4518"
