@@ -1,12 +1,25 @@
 import { NextResponse } from "next/server";
+import { headers } from "next/headers";
 import { prisma } from "@/lib/prisma";
+import { checkRateLimit, isValidSuiAddress } from "@/lib/rate-limit";
 
 export const dynamic = "force-dynamic";
 
 /** User activity stats — individual or leaderboard */
 export async function GET(request: Request) {
+  const hdrs = await headers();
+  const ip = hdrs.get("x-forwarded-for") ?? hdrs.get("x-real-ip") ?? "unknown";
+  const { allowed } = checkRateLimit(`users:${ip}`, 30, 60_000);
+  if (!allowed) {
+    return NextResponse.json({ error: "Rate limit exceeded" }, { status: 429 });
+  }
+
   const { searchParams } = new URL(request.url);
   const address = searchParams.get("address");
+
+  if (address && !isValidSuiAddress(address)) {
+    return NextResponse.json({ error: "Invalid Sui address" }, { status: 400 });
+  }
 
   try {
     // Single user lookup

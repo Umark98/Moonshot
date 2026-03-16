@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
+import { headers } from "next/headers";
 import { getSuiClient } from "@/lib/sui-client";
 import { prisma } from "@/lib/prisma";
 import { PACKAGE_ID } from "@/lib/constants";
+import { checkRateLimit, isValidSuiAddress } from "@/lib/rate-limit";
 
 export const dynamic = "force-dynamic";
 
@@ -25,12 +27,20 @@ function extractId(val: { bytes: string } | string | undefined): string {
 }
 
 export async function GET(request: Request) {
+  // SECURITY: Rate limit per IP
+  const hdrs = await headers();
+  const ip = hdrs.get("x-forwarded-for") ?? hdrs.get("x-real-ip") ?? "unknown";
+  const { allowed } = checkRateLimit(`positions:${ip}`, 30, 60_000);
+  if (!allowed) {
+    return NextResponse.json({ error: "Rate limit exceeded" }, { status: 429 });
+  }
+
   const { searchParams } = new URL(request.url);
   const address = searchParams.get("address");
 
-  if (!address) {
+  if (!address || !isValidSuiAddress(address)) {
     return NextResponse.json(
-      { error: "address parameter required" },
+      { error: "Valid Sui address parameter required" },
       { status: 400 }
     );
   }

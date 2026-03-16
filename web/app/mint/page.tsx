@@ -74,6 +74,7 @@ export default function MintPage() {
       if (!ptObj?.data?.objectId || !ytObj?.data?.objectId) throw new Error("Missing tokens");
       const tx = buildRedeemPY(
         market.id,
+        market.syVaultId,
         ptObj.data.objectId,
         ytObj.data.objectId,
         market.coinType,
@@ -106,7 +107,7 @@ export default function MintPage() {
         <DatabaseZap className="mb-4 h-10 w-10 text-zinc-700" />
         <h2 className="text-display-sm text-white">No Markets Available</h2>
         <p className="mt-2 text-body-md text-zinc-500 max-w-sm">
-          Create a yield market first, then mint PT + YT from deposited SY tokens.
+          Create a yield market first, then mint PT + YT from your underlying tokens.
         </p>
       </motion.div>
     );
@@ -121,7 +122,7 @@ export default function MintPage() {
       <motion.div variants={fadeUp}>
         <h2 className="text-display-md text-white">Mint / Redeem</h2>
         <p className="mt-1 text-body-md text-zinc-500">
-          Split yield-bearing assets into PT + YT, or recombine to recover SY
+          Split yield-bearing assets into PT + YT, or recombine to recover underlying
         </p>
       </motion.div>
 
@@ -304,7 +305,7 @@ export default function MintPage() {
                 </div>
                 <div className="flex flex-col items-center gap-1.5">
                   <TokenIcon symbol={market.underlyingSymbol} size="lg" />
-                  <span className="text-caption font-semibold text-zinc-400">SY</span>
+                  <span className="text-caption font-semibold text-zinc-400">SUI</span>
                 </div>
               </div>
 
@@ -330,7 +331,7 @@ export default function MintPage() {
                   animate={{ opacity: 1 }}
                   className="rounded-xl bg-accent-green/10 p-3 text-center text-caption font-semibold text-accent-green"
                 >
-                  Redeem successful! SY returned to your wallet.
+                  Redeem successful! Underlying returned to your wallet.
                 </motion.div>
               )}
 
@@ -338,7 +339,7 @@ export default function MintPage() {
                 <ConnectWalletButton />
               ) : (
                 <button onClick={handleRedeem} disabled={!canRedeem || loading} className="btn-primary w-full py-3.5">
-                  {loading ? "Redeeming..." : canRedeem ? "Redeem PT + YT → SY" : "No PT + YT to redeem"}
+                  {loading ? "Redeeming..." : canRedeem ? "Redeem PT + YT → SUI" : "No PT + YT to redeem"}
                 </button>
               )}
 

@@ -1,7 +1,10 @@
+import crypto from "crypto";
 import { NextResponse } from "next/server";
+import { headers } from "next/headers";
 import { prisma } from "@/lib/prisma";
 import { getSuiClient, RPC_URL } from "@/lib/sui-client";
 import { PACKAGE_ID } from "@/lib/constants";
+import { checkRateLimit } from "@/lib/rate-limit";
 
 export const dynamic = "force-dynamic";
 
@@ -31,8 +34,29 @@ function symbolFromCoinType(coinType: string): string {
  * POST /api/sync — Sync on-chain state to database.
  * Called manually or by a cron job to bootstrap/refresh DB state.
  */
-export async function POST() {
+export async function POST(request: Request) {
   try {
+    // SECURITY: Rate limit sync endpoint — max 5 requests per minute
+    const hdrs = await headers();
+    const ip = hdrs.get("x-forwarded-for") ?? hdrs.get("x-real-ip") ?? "unknown";
+    const { allowed } = checkRateLimit(`sync:${ip}`, 5, 60_000);
+    if (!allowed) {
+      return NextResponse.json(
+        { error: "Rate limit exceeded. Try again later." },
+        { status: 429 },
+      );
+    }
+
+    // SECURITY: Require API key for sync operations (constant-time comparison)
+    const apiKey = request.headers.get("x-api-key") ?? hdrs.get("x-api-key");
+    const expectedKey = process.env.SYNC_API_KEY;
+    const isValid = expectedKey && apiKey
+      ? crypto.timingSafeEqual(Buffer.from(apiKey), Buffer.from(expectedKey))
+      : false;
+    if (expectedKey && !isValid) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
     const isDeployed = PACKAGE_ID && !PACKAGE_ID.startsWith("0x00000000");
     if (!isDeployed) {
       return NextResponse.json({ synced: false, reason: "not deployed" });

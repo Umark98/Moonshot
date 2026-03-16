@@ -73,12 +73,13 @@ export function buildDeposit(
 }
 
 /**
- * Mint PT + YT from an owned SYToken.
- * Move: yield_tokenizer::mint_py<T>(config, sy_token, clock, ctx) → (PT<T>, YT<T>)
+ * Mint PT + YT from an owned Coin<T> (underlying).
+ * Move: yield_tokenizer::mint_py<T>(config, vault, coin, clock, ctx) → (PT<T>, YT<T>)
  */
 export function buildMintPY(
   configId: ObjectId,
-  syTokenId: ObjectId,
+  vaultId: ObjectId,
+  coinObjectId: ObjectId,
   coinType: string,
 ): Transaction {
   const tx = new Transaction();
@@ -87,7 +88,8 @@ export function buildMintPY(
     typeArguments: [coinType],
     arguments: [
       tx.object(configId),
-      tx.object(syTokenId),
+      tx.object(vaultId),
+      tx.object(coinObjectId),
       tx.object("0x6"),
     ],
   });
@@ -95,8 +97,8 @@ export function buildMintPY(
 }
 
 /**
- * Deposit underlying → SY → Mint PT+YT in one PTB.
- * Combines deposit + mint atomically.
+ * Split Coin<T> from gas → Mint PT+YT directly in one PTB.
+ * mint_py now accepts Coin<T> (underlying) directly — no SY deposit step needed.
  */
 export function buildDepositAndMint(
   vaultId: ObjectId,
@@ -107,20 +109,14 @@ export function buildDepositAndMint(
   const tx = new Transaction();
   const [coin] = tx.splitCoins(tx.gas, [tx.pure.u64(amountMist)]);
 
-  // Step 1: Deposit underlying → SY
-  const [syToken] = tx.moveCall({
-    target: `${MODULES.standardized_yield}::deposit`,
-    typeArguments: [coinType],
-    arguments: [tx.object(vaultId), coin],
-  });
-
-  // Step 2: Mint PT + YT from SY
+  // Mint PT + YT directly from Coin<T> (vault is read-only reference)
   tx.moveCall({
     target: `${MODULES.yield_tokenizer}::mint_py`,
     typeArguments: [coinType],
     arguments: [
       tx.object(configId),
-      syToken,
+      tx.object(vaultId),
+      coin,
       tx.object("0x6"),
     ],
   });
@@ -128,13 +124,14 @@ export function buildDepositAndMint(
 }
 
 /**
- * Swap SY → PT on AMM.
- * Move: rate_market::swap_sy_for_pt<T>(pool, config, sy_in, min_pt_out, clock, ctx) → PT<T>
+ * Swap Coin<T> (underlying) → PT on AMM.
+ * Move: rate_market::swap_sy_for_pt<T>(pool, vault, config, coin, min_pt_out, clock, ctx) → PT<T>
  */
 export function buildSwapSyToPt(
   poolId: ObjectId,
+  vaultId: ObjectId,
   configId: ObjectId,
-  syTokenId: ObjectId,
+  coinObjectId: ObjectId,
   minPtOut: bigint,
   coinType: string,
 ): Transaction {
@@ -144,8 +141,9 @@ export function buildSwapSyToPt(
     typeArguments: [coinType],
     arguments: [
       tx.object(poolId),
+      tx.object(vaultId),
       tx.object(configId),
-      tx.object(syTokenId),
+      tx.object(coinObjectId),
       tx.pure.u64(minPtOut),
       tx.object("0x6"),
     ],
@@ -154,15 +152,15 @@ export function buildSwapSyToPt(
 }
 
 /**
- * Swap PT → SY on AMM.
- * Move: rate_market::swap_pt_for_sy<T>(pool, vault, config, pt_in, min_sy_out, clock, ctx) → SYToken<T>
+ * Swap PT → Coin<T> (underlying) on AMM.
+ * Move: rate_market::swap_pt_for_sy<T>(pool, vault, config, pt_in, min_underlying_out, clock, ctx) → Coin<T>
  */
 export function buildSwapPtToSy(
   poolId: ObjectId,
   vaultId: ObjectId,
   configId: ObjectId,
   ptTokenId: ObjectId,
-  minSyOut: bigint,
+  minUnderlyingOut: bigint,
   coinType: string,
 ): Transaction {
   const tx = new Transaction();
@@ -174,7 +172,7 @@ export function buildSwapPtToSy(
       tx.object(vaultId),
       tx.object(configId),
       tx.object(ptTokenId),
-      tx.pure.u64(minSyOut),
+      tx.pure.u64(minUnderlyingOut),
       tx.object("0x6"),
     ],
   });
@@ -182,7 +180,8 @@ export function buildSwapPtToSy(
 }
 
 /**
- * Deposit underlying → SY → Swap SY for PT in one PTB.
+ * Split Coin<T> from gas → Swap underlying for PT in one PTB.
+ * swap_sy_for_pt now accepts Coin<T> directly — no SY deposit step needed.
  * For Trade page: user has SUI, wants PT.
  */
 export function buildDepositAndSwapToPt(
@@ -196,19 +195,14 @@ export function buildDepositAndSwapToPt(
   const tx = new Transaction();
   const [coin] = tx.splitCoins(tx.gas, [tx.pure.u64(amountMist)]);
 
-  const [syToken] = tx.moveCall({
-    target: `${MODULES.standardized_yield}::deposit`,
-    typeArguments: [coinType],
-    arguments: [tx.object(vaultId), coin],
-  });
-
   tx.moveCall({
     target: `${MODULES.rate_market}::swap_sy_for_pt`,
     typeArguments: [coinType],
     arguments: [
       tx.object(poolId),
+      tx.object(vaultId),
       tx.object(configId),
-      syToken,
+      coin,
       tx.pure.u64(minPtOut),
       tx.object("0x6"),
     ],
@@ -217,11 +211,12 @@ export function buildDepositAndSwapToPt(
 }
 
 /**
- * Redeem PT + YT → SY (pre-maturity).
- * Move: yield_tokenizer::redeem_py_pre_expiry<T>(config, pt, yt, ctx) → u64
+ * Redeem PT + YT → Coin<T> (underlying, pre-maturity).
+ * Move: yield_tokenizer::redeem_py_pre_expiry<T>(config, vault, pt, yt, ctx) → Coin<T>
  */
 export function buildRedeemPY(
   configId: ObjectId,
+  vaultId: ObjectId,
   ptTokenId: ObjectId,
   ytTokenId: ObjectId,
   coinType: string,
@@ -232,6 +227,7 @@ export function buildRedeemPY(
     typeArguments: [coinType],
     arguments: [
       tx.object(configId),
+      tx.object(vaultId),
       tx.object(ptTokenId),
       tx.object(ytTokenId),
     ],
@@ -240,8 +236,8 @@ export function buildRedeemPY(
 }
 
 /**
- * Redeem PT → SY (post-maturity).
- * Move: yield_tokenizer::redeem_pt_post_expiry<T>(config, pt) → u64
+ * Redeem PT → Coin<T> (underlying, post-maturity).
+ * Move: yield_tokenizer::redeem_pt_post_expiry<T>(config, pt) → Coin<T>
  */
 export function buildRedeemPtPostMaturity(
   configId: ObjectId,
@@ -259,13 +255,15 @@ export function buildRedeemPtPostMaturity(
 
 /**
  * Add liquidity to AMM.
- * Move: rate_market::add_liquidity<T>(pool, config, sy, pt, clock, ctx) → LPToken<T>
+ * Move: rate_market::add_liquidity<T>(pool, vault, underlying: Coin<T>, pt_amount: u64, sy_amount: u64, clock, ctx) → LPToken<T>
  */
 export function buildAddLiquidity(
   poolId: ObjectId,
+  vaultId: ObjectId,
   configId: ObjectId,
-  syTokenId: ObjectId,
-  ptTokenId: ObjectId,
+  coinObjectId: ObjectId,
+  ptAmount: bigint,
+  syAmount: bigint,
   coinType: string,
 ): Transaction {
   const tx = new Transaction();
@@ -274,9 +272,10 @@ export function buildAddLiquidity(
     typeArguments: [coinType],
     arguments: [
       tx.object(poolId),
-      tx.object(configId),
-      tx.object(syTokenId),
-      tx.object(ptTokenId),
+      tx.object(vaultId),
+      tx.object(coinObjectId),
+      tx.pure.u64(ptAmount),
+      tx.pure.u64(syAmount),
       tx.object("0x6"),
     ],
   });

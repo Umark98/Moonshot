@@ -1,10 +1,19 @@
 import { NextResponse } from "next/server";
+import { headers } from "next/headers";
 import { prisma } from "@/lib/prisma";
+import { checkRateLimit } from "@/lib/rate-limit";
 
 export const dynamic = "force-dynamic";
 
 /** Rate history for a specific market (for charts) */
 export async function GET(request: Request) {
+  const hdrs = await headers();
+  const ip = hdrs.get("x-forwarded-for") ?? hdrs.get("x-real-ip") ?? "unknown";
+  const { allowed } = checkRateLimit(`history:${ip}`, 30, 60_000);
+  if (!allowed) {
+    return NextResponse.json({ error: "Rate limit exceeded" }, { status: 429 });
+  }
+
   const { searchParams } = new URL(request.url);
   const marketId = searchParams.get("marketId");
   const period = searchParams.get("period") || "7d"; // 1d, 7d, 30d, all

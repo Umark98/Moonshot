@@ -52,8 +52,14 @@ export default function TradePage() {
       : (inputNum * market.ptPrice).toFixed(4)
     : "";
 
-  const priceImpact = inputNum > 0
-    ? Math.min(inputNum * 0.0001, 2).toFixed(3) : "0.000";
+  const priceImpact = inputNum > 0 && market
+    ? Math.min(inputNum / (market.tvl > 0 ? market.tvl * 1e9 : 1) * 100, 50).toFixed(3)
+    : "0.000";
+
+  // SECURITY: Calculate minimum output with slippage protection
+  const slippagePct = parseFloat(slippage) / 100;
+  const outputNum = parseFloat(outputAmount || "0");
+  const minOutputMist = BigInt(Math.floor(outputNum * (1 - slippagePct) * 1e9));
 
   // For buy_pt: user needs SUI
   // For sell_pt: user needs PT objects
@@ -68,24 +74,26 @@ export default function TradePage() {
     setTxError(null);
     try {
       if (direction === "buy_pt") {
+        // SECURITY: Apply slippage protection — minPtOut calculated from user's slippage setting
         const tx = buildDepositAndSwapToPt(
           market.syVaultId,
           market.poolId,
           market.id, // YieldMarketConfig ID
           amountMist,
-          BigInt(0),
+          minOutputMist,
           market.coinType,
         );
         await signAndExecute({ transaction: tx });
       } else {
         const ptObj = ptObjects[0];
         if (!ptObj?.data?.objectId) throw new Error("No PT token found");
+        // SECURITY: Apply slippage protection — minSyOut calculated from user's slippage setting
         const tx = buildSwapPtToSy(
           market.poolId,
           market.syVaultId,
           market.id, // YieldMarketConfig ID
           ptObj.data.objectId,
-          BigInt(0),
+          minOutputMist,
           market.coinType,
         );
         await signAndExecute({ transaction: tx });
@@ -102,7 +110,7 @@ export default function TradePage() {
   }
 
   const inputLabel = direction === "buy_pt" ? "SUI" : "PT";
-  const outputLabel = direction === "buy_pt" ? "PT" : "SY";
+  const outputLabel = direction === "buy_pt" ? "PT" : "SUI";
 
   if (isLoading) {
     return (
@@ -122,7 +130,7 @@ export default function TradePage() {
         <DatabaseZap className="mb-4 h-10 w-10 text-zinc-700" />
         <h2 className="text-display-sm text-white">No Markets Available</h2>
         <p className="mt-2 text-body-md text-zinc-500 max-w-sm">
-          Create a yield market and add liquidity to start trading PT and SY tokens.
+          Create a yield market and add liquidity to start trading PT tokens.
         </p>
       </motion.div>
     );
@@ -133,7 +141,7 @@ export default function TradePage() {
       <motion.div variants={fadeUp}>
         <h2 className="text-display-md text-white">Trade</h2>
         <p className="mt-1 text-body-md text-zinc-500">
-          Swap PT and SY tokens on the yield AMM
+          Swap underlying and PT tokens on the yield AMM
         </p>
       </motion.div>
 
@@ -243,7 +251,7 @@ export default function TradePage() {
                   className="space-y-2 rounded-xl bg-white/[0.02] p-4"
                 >
                   {[
-                    ["Rate", `1 SY = ${(1 / market.ptPrice).toFixed(4)} PT`],
+                    ["Rate", `1 SUI = ${(1 / market.ptPrice).toFixed(4)} PT`],
                     ["Price Impact", `${priceImpact}%`, Number(priceImpact) > 1],
                     ["Slippage", `${slippage}%`],
                     ["Implied APY", formatRate(market.impliedRate), false, true],
@@ -349,8 +357,8 @@ export default function TradePage() {
             <div className="space-y-3">
               {[
                 ["Implied APY", formatRate(market.impliedRate), "text-accent-green font-bold"],
-                ["PT Price", `${market.ptPrice.toFixed(4)} SY`, "mono-number text-white"],
-                ["YT Price", `${(1 - market.ptPrice).toFixed(4)} SY`, "mono-number text-white"],
+                ["PT Price", `${market.ptPrice.toFixed(4)} SUI`, "mono-number text-white"],
+                ["YT Price", `${(1 - market.ptPrice).toFixed(4)} SUI`, "mono-number text-white"],
               ].map(([label, value, cls]) => (
                 <div key={label} className="flex justify-between text-body-sm">
                   <span className="text-zinc-500">{label}</span>
@@ -375,12 +383,12 @@ export default function TradePage() {
             <div className="space-y-3 text-caption text-zinc-500">
               <p>
                 <strong className="text-zinc-300">Buy PT</strong> — lock in a
-                fixed yield. PT trades below 1.0 SY; the discount is your
+                fixed yield. PT trades below 1.0 underlying; the discount is your
                 guaranteed return at maturity.
               </p>
               <p>
                 <strong className="text-zinc-300">Sell PT</strong> — exit your
-                fixed position early and receive SY immediately.
+                fixed position early and receive underlying immediately.
               </p>
               <p>
                 <strong className="text-zinc-300">YT</strong> — for leveraged

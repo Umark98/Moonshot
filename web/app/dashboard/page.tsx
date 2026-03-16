@@ -33,8 +33,10 @@ const fadeUp = {
 export default function DashboardPage() {
   const { data: stats, isLoading: statsLoading } = useProtocolStats();
   const [selectedAsset, setSelectedAsset] = useState("SUI");
+  const [chartMetric, setChartMetric] = useState<"totalTvl" | "totalVolume" | "totalFees" | "uniqueUsers">("totalTvl");
   const { data: curve, isLoading: curveLoading } = useYieldCurve(selectedAsset);
   const { data: markets, isLoading: marketsLoading } = useMarkets();
+  const { data: dailyStats } = useDailyStats(30);
 
   const s = stats ?? { totalTvl: 0, totalVolume24h: 0, totalMarkets: 0, activeMarkets: 0, totalUsers: 0, totalFees24h: 0 };
   const hasMarkets = markets && markets.length > 0;
@@ -112,6 +114,41 @@ export default function DashboardPage() {
           />
         </motion.div>
       </motion.div>
+
+      {/* Protocol Metrics Chart */}
+      {dailyStats && dailyStats.length > 0 && (
+        <motion.div variants={fadeUp} className="glass-card p-6">
+          <div className="mb-6 flex items-center justify-between">
+            <div>
+              <h3 className="text-display-sm text-white">Protocol Metrics</h3>
+              <p className="mt-0.5 text-body-sm text-zinc-500">30-day history</p>
+            </div>
+            <div className="flex items-center gap-2">
+              {(
+                [
+                  ["totalTvl", "TVL"],
+                  ["totalVolume", "Volume"],
+                  ["totalFees", "Fees"],
+                  ["uniqueUsers", "Users"],
+                ] as const
+              ).map(([key, label]) => (
+                <button
+                  key={key}
+                  onClick={() => setChartMetric(key)}
+                  className={`rounded-full px-3.5 py-1.5 text-caption font-semibold transition-all duration-200 ${
+                    chartMetric === key
+                      ? "bg-brand-500/10 text-brand-400 ring-1 ring-brand-500/20"
+                      : "text-zinc-500 hover:bg-white/[0.03] hover:text-zinc-300"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <TvlChart data={dailyStats} height={240} metric={chartMetric} />
+        </motion.div>
+      )}
 
       {/* Yield Curve */}
       <motion.div variants={fadeUp} className="glass-card p-6">
