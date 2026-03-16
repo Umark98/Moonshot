@@ -35,7 +35,9 @@ module crux::flash_mint_tests {
             let vault = scenario.take_shared<SYVault<FM_COIN>>();
             let mut clk = clock::create_for_testing(scenario.ctx());
             clk.set_for_testing(1000);
-            yield_tokenizer::create_market<FM_COIN>(&vault, MATURITY_MS, &clk, scenario.ctx());
+            let admin_cap = scenario.take_from_sender<AdminCap>();
+            yield_tokenizer::create_market<FM_COIN>(&admin_cap, &vault, MATURITY_MS, &clk, scenario.ctx());
+            scenario.return_to_sender(admin_cap);
             clk.destroy_for_testing();
             ts::return_shared(vault);
         };
@@ -50,7 +52,7 @@ module crux::flash_mint_tests {
         ts::next_tx(&mut scenario, USER);
         {
             let mut config = scenario.take_shared<YieldMarketConfig<FM_COIN>>();
-            let mut vault = scenario.take_shared<SYVault<FM_COIN>>();
+            let vault = scenario.take_shared<SYVault<FM_COIN>>();
             let mut clk = clock::create_for_testing(scenario.ctx());
             clk.set_for_testing(2000);
 
@@ -66,12 +68,9 @@ module crux::flash_mint_tests {
             let owed = flash_mint::amount_owed(&receipt);
             assert!(owed >= 1000); // 1000 + fee
 
-            // Create SY to repay (simulate selling PT on AMM)
+            // Repay flash mint with underlying coin
             let repay_coin = coin::mint_for_testing<FM_COIN>(1100, scenario.ctx());
-            let repay_sy = standardized_yield::deposit(&mut vault, repay_coin, scenario.ctx());
-
-            // Repay flash mint
-            flash_mint::repay_flash_mint(&mut vault, receipt, repay_sy, scenario.ctx());
+            flash_mint::repay_flash_mint(&mut config, &vault, receipt, repay_coin, scenario.ctx());
 
             sui::transfer::public_transfer(pt, USER);
             sui::transfer::public_transfer(yt, USER);
@@ -90,7 +89,7 @@ module crux::flash_mint_tests {
         ts::next_tx(&mut scenario, USER);
         {
             let mut config = scenario.take_shared<YieldMarketConfig<FM_COIN>>();
-            let mut vault = scenario.take_shared<SYVault<FM_COIN>>();
+            let vault = scenario.take_shared<SYVault<FM_COIN>>();
             let mut clk = clock::create_for_testing(scenario.ctx());
             clk.set_for_testing(2000);
 
@@ -98,9 +97,7 @@ module crux::flash_mint_tests {
 
             // Try to repay with less than owed
             let repay_coin = coin::mint_for_testing<FM_COIN>(500, scenario.ctx());
-            let repay_sy = standardized_yield::deposit(&mut vault, repay_coin, scenario.ctx());
-
-            flash_mint::repay_flash_mint(&mut vault, receipt, repay_sy, scenario.ctx());
+            flash_mint::repay_flash_mint(&mut config, &vault, receipt, repay_coin, scenario.ctx());
 
             sui::transfer::public_transfer(pt, USER);
             sui::transfer::public_transfer(yt, USER);
@@ -126,8 +123,7 @@ module crux::flash_mint_tests {
 
             sui::transfer::public_transfer(pt, USER);
             sui::transfer::public_transfer(yt, USER);
-            // receipt can't be dropped — but we abort before needing to handle it
-            let _ = receipt;
+            flash_mint::destroy_receipt_for_testing(receipt);
             clk.destroy_for_testing();
             ts::return_shared(config);
         };
@@ -145,7 +141,9 @@ module crux::flash_mint_tests {
             let mut config = scenario.take_shared<YieldMarketConfig<FM_COIN>>();
             let mut clk = clock::create_for_testing(scenario.ctx());
             clk.set_for_testing(MATURITY_MS + 1);
-            yield_tokenizer::settle_market(&mut config, &clk);
+            let admin_cap = scenario.take_from_sender<AdminCap>();
+            yield_tokenizer::settle_market(&admin_cap, &mut config, &clk);
+            scenario.return_to_sender(admin_cap);
             clk.destroy_for_testing();
             ts::return_shared(config);
         };
@@ -160,7 +158,7 @@ module crux::flash_mint_tests {
 
             sui::transfer::public_transfer(pt, USER);
             sui::transfer::public_transfer(yt, USER);
-            let _ = receipt;
+            flash_mint::destroy_receipt_for_testing(receipt);
             clk.destroy_for_testing();
             ts::return_shared(config);
         };
@@ -174,7 +172,7 @@ module crux::flash_mint_tests {
         ts::next_tx(&mut scenario, USER);
         {
             let mut config = scenario.take_shared<YieldMarketConfig<FM_COIN>>();
-            let mut vault = scenario.take_shared<SYVault<FM_COIN>>();
+            let vault = scenario.take_shared<SYVault<FM_COIN>>();
             let mut clk = clock::create_for_testing(scenario.ctx());
             clk.set_for_testing(2000);
 
@@ -184,8 +182,7 @@ module crux::flash_mint_tests {
             assert!(fee == 1); // 10000 * 0.0001 = 1
 
             let repay_coin = coin::mint_for_testing<FM_COIN>(11000, scenario.ctx());
-            let repay_sy = standardized_yield::deposit(&mut vault, repay_coin, scenario.ctx());
-            flash_mint::repay_flash_mint(&mut vault, receipt, repay_sy, scenario.ctx());
+            flash_mint::repay_flash_mint(&mut config, &vault, receipt, repay_coin, scenario.ctx());
 
             sui::transfer::public_transfer(pt, USER);
             sui::transfer::public_transfer(yt, USER);

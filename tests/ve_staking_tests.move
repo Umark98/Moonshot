@@ -186,7 +186,7 @@ module crux::ve_staking_tests {
 
             // Extend to 2 years
             let new_end = 1000 + 2 * ONE_YEAR_MS;
-            ve_staking::extend_lock(&mut pool, &ve_token, new_end, &clk);
+            ve_staking::extend_lock(&mut pool, &ve_token, new_end, &clk, scenario.ctx());
 
             let new_ve = ve_staking::position_ve_amount(&pool, 0);
             // New ve should be ~2x old ve (2yr vs 1yr lock)

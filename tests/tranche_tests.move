@@ -3,7 +3,7 @@ module crux::tranche_tests {
     use sui::test_scenario::{Self as ts};
     use sui::clock;
 
-    use crux::tranche_engine::{Self, TrancheVault, SeniorTranche, JuniorTranche};
+    use crux::tranche_engine::{Self, TrancheVault, SeniorTranche, JuniorTranche, AdminCap};
 
     const ADMIN: address = @0xAD;
     const USER1: address = @0xB0B;
@@ -14,6 +14,7 @@ module crux::tranche_tests {
     fun setup(): ts::Scenario {
         let mut scenario = ts::begin(ADMIN);
         {
+            tranche_engine::init_for_testing(scenario.ctx());
             let mut clock = clock::create_for_testing(scenario.ctx());
             clock.set_for_testing(1000);
             let _vault_id = tranche_engine::create_tranche_vault(
@@ -121,14 +122,16 @@ module crux::tranche_tests {
         // Junior gets remainder = 40 SY (20% return on 200)
         scenario.next_tx(ADMIN);
         {
+            let admin_cap = scenario.take_from_sender<AdminCap>();
             let mut vault = scenario.take_shared<TrancheVault>();
             let mut clock = clock::create_for_testing(scenario.ctx());
             clock.set_for_testing(100_000_001); // past maturity
 
-            tranche_engine::settle(&mut vault, 80, &clock);
+            tranche_engine::settle(&admin_cap, &mut vault, 80, &clock);
             assert!(tranche_engine::is_settled(&vault));
 
             clock.destroy_for_testing();
+            scenario.return_to_sender(admin_cap);
             ts::return_shared(vault);
         };
 
@@ -181,17 +184,19 @@ module crux::tranche_tests {
         };
 
         // Settle with 2% yield = 20 SY
-        // Senior target = 40, but only 20 available → senior gets all 20
+        // Senior target = 40, but only 20 available -> senior gets all 20
         // Junior gets 0 yield (first-loss)
         scenario.next_tx(ADMIN);
         {
+            let admin_cap = scenario.take_from_sender<AdminCap>();
             let mut vault = scenario.take_shared<TrancheVault>();
             let mut clock = clock::create_for_testing(scenario.ctx());
             clock.set_for_testing(100_000_001);
 
-            tranche_engine::settle(&mut vault, 20, &clock);
+            tranche_engine::settle(&admin_cap, &mut vault, 20, &clock);
 
             clock.destroy_for_testing();
+            scenario.return_to_sender(admin_cap);
             ts::return_shared(vault);
         };
 
@@ -230,13 +235,15 @@ module crux::tranche_tests {
 
         scenario.next_tx(ADMIN);
         {
+            let admin_cap = scenario.take_from_sender<AdminCap>();
             let mut vault = scenario.take_shared<TrancheVault>();
             let mut clock = clock::create_for_testing(scenario.ctx());
             clock.set_for_testing(2000); // before maturity
 
-            tranche_engine::settle(&mut vault, 80, &clock);
+            tranche_engine::settle(&admin_cap, &mut vault, 80, &clock);
 
             clock.destroy_for_testing();
+            scenario.return_to_sender(admin_cap);
             ts::return_shared(vault);
         };
         scenario.end();
@@ -253,12 +260,15 @@ module crux::tranche_tests {
             let mut clock = clock::create_for_testing(scenario.ctx());
             clock.set_for_testing(2000);
 
+            // Deposit junior first to satisfy leverage ratio
+            let junior = tranche_engine::deposit_junior(&mut vault, 200, &clock, scenario.ctx());
             let senior = tranche_engine::deposit_senior(&mut vault, 800, &clock, scenario.ctx());
             clock.destroy_for_testing();
 
             // Try to redeem before settlement
             let _payout = tranche_engine::redeem_senior(&vault, senior);
 
+            sui::transfer::public_transfer(junior, USER1);
             ts::return_shared(vault);
         };
         scenario.end();

@@ -113,15 +113,17 @@ module crux::standardized_yield_tests {
 
         scenario.next_tx(ADMIN);
         {
+            let admin_cap = scenario.take_from_sender<AdminCap>();
             let mut vault = scenario.take_shared<SYVault<TEST_COIN>>();
             let clock = clock::create_for_testing(scenario.ctx());
 
             // Update rate to 1.05 (5% yield accrued)
             let new_rate = 1_050_000_000_000_000_000; // 1.05 WAD
-            standardized_yield::update_exchange_rate(&mut vault, new_rate, &clock);
+            standardized_yield::update_exchange_rate(&admin_cap, &mut vault, new_rate, &clock);
 
             assert!(standardized_yield::exchange_rate(&vault) == new_rate);
             clock.destroy_for_testing();
+            scenario.return_to_sender(admin_cap);
             ts::return_shared(vault);
         };
         scenario.end();
@@ -132,25 +134,27 @@ module crux::standardized_yield_tests {
         let mut scenario = setup();
         create_test_vault(&mut scenario);
 
-        // Update exchange rate to 2.0 before depositing
+        // Update exchange rate to 1.1 before depositing (within 10% cap)
         scenario.next_tx(ADMIN);
         {
+            let admin_cap = scenario.take_from_sender<AdminCap>();
             let mut vault = scenario.take_shared<SYVault<TEST_COIN>>();
             let clock = clock::create_for_testing(scenario.ctx());
-            let new_rate = 2_000_000_000_000_000_000; // 2.0 WAD
-            standardized_yield::update_exchange_rate(&mut vault, new_rate, &clock);
+            let new_rate = 1_100_000_000_000_000_000; // 1.1 WAD
+            standardized_yield::update_exchange_rate(&admin_cap, &mut vault, new_rate, &clock);
             clock.destroy_for_testing();
+            scenario.return_to_sender(admin_cap);
             ts::return_shared(vault);
         };
 
-        // Deposit 1000 underlying at 2.0 rate → should get 500 SY
+        // Deposit 1100 underlying at 1.1 rate → should get 1000 SY
         scenario.next_tx(USER);
         {
             let mut vault = scenario.take_shared<SYVault<TEST_COIN>>();
-            let deposit_coin = coin::mint_for_testing<TEST_COIN>(1000, scenario.ctx());
+            let deposit_coin = coin::mint_for_testing<TEST_COIN>(1100, scenario.ctx());
             let sy_token = standardized_yield::deposit(&mut vault, deposit_coin, scenario.ctx());
 
-            assert!(standardized_yield::sy_amount(&sy_token) == 500);
+            assert!(standardized_yield::sy_amount(&sy_token) == 1000);
             sui::transfer::public_transfer(sy_token, USER);
             ts::return_shared(vault);
         };
@@ -295,11 +299,13 @@ module crux::standardized_yield_tests {
 
         scenario.next_tx(ADMIN);
         {
+            let admin_cap = scenario.take_from_sender<AdminCap>();
             let mut vault = scenario.take_shared<SYVault<TEST_COIN>>();
             let clock = clock::create_for_testing(scenario.ctx());
 
             // First increase
             standardized_yield::update_exchange_rate(
+                &admin_cap,
                 &mut vault,
                 1_100_000_000_000_000_000,
                 &clock,
@@ -307,12 +313,14 @@ module crux::standardized_yield_tests {
 
             // Try to decrease — should fail
             standardized_yield::update_exchange_rate(
+                &admin_cap,
                 &mut vault,
                 1_000_000_000_000_000_000,
                 &clock,
             );
 
             clock.destroy_for_testing();
+            scenario.return_to_sender(admin_cap);
             ts::return_shared(vault);
         };
         scenario.end();

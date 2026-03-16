@@ -2,8 +2,12 @@
 module crux::gauge_voting_tests {
     use sui::test_scenario::{Self as ts};
     use sui::clock;
+    use sui::coin;
 
     use crux::gauge_voting::{Self, GaugeController, VoteRecord};
+    use crux::ve_staking::{Self, VeStakingPool, VeToken};
+
+    public struct STAKE_COIN has drop {}
 
     const ADMIN: address = @0xAD;
     const VOTER1: address = @0xB0B;
@@ -67,6 +71,7 @@ module crux::gauge_voting_tests {
             let mut clk = clock::create_for_testing(scenario.ctx());
             clk.set_for_testing(1000);
             gauge_voting::create_controller(&clk, scenario.ctx());
+            ve_staking::create_pool_for_testing(scenario.ctx());
             clk.destroy_for_testing();
         };
 
@@ -81,16 +86,21 @@ module crux::gauge_voting_tests {
         ts::next_tx(&mut scenario, VOTER1);
         {
             let mut controller = scenario.take_shared<GaugeController>();
+            let mut pool = scenario.take_shared<VeStakingPool>();
             let mut clk = clock::create_for_testing(scenario.ctx());
             clk.set_for_testing(2000);
 
-            let vote_amount = 100 * WAD;
-            let record = gauge_voting::cast_vote(&mut controller, 0, vote_amount, &clk, scenario.ctx());
+            let stake_coin = coin::mint_for_testing<STAKE_COIN>(100, scenario.ctx());
+            let ve_token = ve_staking::stake(&mut pool, stake_coin, 126_230_400_000, &clk, scenario.ctx());
 
-            assert!(gauge_voting::total_votes(&controller) == vote_amount);
+            let record = gauge_voting::cast_vote(&mut controller, &pool, &ve_token, 0, &clk, scenario.ctx());
 
+            assert!(gauge_voting::total_votes(&controller) > 0);
+
+            sui::transfer::public_transfer(ve_token, VOTER1);
             sui::transfer::public_transfer(record, VOTER1);
             clk.destroy_for_testing();
+            ts::return_shared(pool);
             ts::return_shared(controller);
         };
         scenario.end();
@@ -103,6 +113,7 @@ module crux::gauge_voting_tests {
             let mut clk = clock::create_for_testing(scenario.ctx());
             clk.set_for_testing(1000);
             gauge_voting::create_controller(&clk, scenario.ctx());
+            ve_staking::create_pool_for_testing(scenario.ctx());
             clk.destroy_for_testing();
         };
 
@@ -118,11 +129,17 @@ module crux::gauge_voting_tests {
         ts::next_tx(&mut scenario, VOTER1);
         {
             let mut controller = scenario.take_shared<GaugeController>();
+            let mut pool = scenario.take_shared<VeStakingPool>();
             let mut clk = clock::create_for_testing(scenario.ctx());
             clk.set_for_testing(2000);
 
-            let record1 = gauge_voting::cast_vote(&mut controller, 0, 75 * WAD, &clk, scenario.ctx());
-            let record2 = gauge_voting::cast_vote(&mut controller, 1, 25 * WAD, &clk, scenario.ctx());
+            let stake_coin1 = coin::mint_for_testing<STAKE_COIN>(75, scenario.ctx());
+            let ve_token1 = ve_staking::stake(&mut pool, stake_coin1, 126_230_400_000, &clk, scenario.ctx());
+            let record1 = gauge_voting::cast_vote(&mut controller, &pool, &ve_token1, 0, &clk, scenario.ctx());
+
+            let stake_coin2 = coin::mint_for_testing<STAKE_COIN>(25, scenario.ctx());
+            let ve_token2 = ve_staking::stake(&mut pool, stake_coin2, 126_230_400_000, &clk, scenario.ctx());
+            let record2 = gauge_voting::cast_vote(&mut controller, &pool, &ve_token2, 1, &clk, scenario.ctx());
 
             // Gauge 0 share = 75/100 = 0.75 WAD
             let share0 = gauge_voting::get_gauge_share(&controller, 0);
@@ -138,9 +155,12 @@ module crux::gauge_voting_tests {
             let emissions1 = gauge_voting::get_gauge_emissions(&controller, 1);
             assert!(emissions1 == 12_500);
 
+            sui::transfer::public_transfer(ve_token1, VOTER1);
+            sui::transfer::public_transfer(ve_token2, VOTER1);
             sui::transfer::public_transfer(record1, VOTER1);
             sui::transfer::public_transfer(record2, VOTER1);
             clk.destroy_for_testing();
+            ts::return_shared(pool);
             ts::return_shared(controller);
         };
         scenario.end();
@@ -153,6 +173,7 @@ module crux::gauge_voting_tests {
             let mut clk = clock::create_for_testing(scenario.ctx());
             clk.set_for_testing(1000);
             gauge_voting::create_controller(&clk, scenario.ctx());
+            ve_staking::create_pool_for_testing(scenario.ctx());
             clk.destroy_for_testing();
         };
 
@@ -167,11 +188,16 @@ module crux::gauge_voting_tests {
         ts::next_tx(&mut scenario, VOTER1);
         {
             let mut controller = scenario.take_shared<GaugeController>();
+            let mut pool = scenario.take_shared<VeStakingPool>();
             let mut clk = clock::create_for_testing(scenario.ctx());
             clk.set_for_testing(2000);
-            let record = gauge_voting::cast_vote(&mut controller, 0, 100 * WAD, &clk, scenario.ctx());
+            let stake_coin = coin::mint_for_testing<STAKE_COIN>(100, scenario.ctx());
+            let ve_token = ve_staking::stake(&mut pool, stake_coin, 126_230_400_000, &clk, scenario.ctx());
+            let record = gauge_voting::cast_vote(&mut controller, &pool, &ve_token, 0, &clk, scenario.ctx());
+            sui::transfer::public_transfer(ve_token, VOTER1);
             sui::transfer::public_transfer(record, VOTER1);
             clk.destroy_for_testing();
+            ts::return_shared(pool);
             ts::return_shared(controller);
         };
 
@@ -220,13 +246,14 @@ module crux::gauge_voting_tests {
     }
 
     #[test]
-    #[expected_failure(abort_code = 973)] // EZeroVotes
+    #[expected_failure(abort_code = 965)] // EZeroAmount - ve_staking rejects zero stake
     fun test_zero_vote() {
         let mut scenario = ts::begin(ADMIN);
         {
             let mut clk = clock::create_for_testing(scenario.ctx());
             clk.set_for_testing(1000);
             gauge_voting::create_controller(&clk, scenario.ctx());
+            ve_staking::create_pool_for_testing(scenario.ctx());
             clk.destroy_for_testing();
         };
 
@@ -240,13 +267,20 @@ module crux::gauge_voting_tests {
         ts::next_tx(&mut scenario, VOTER1);
         {
             let mut controller = scenario.take_shared<GaugeController>();
+            let mut pool = scenario.take_shared<VeStakingPool>();
             let mut clk = clock::create_for_testing(scenario.ctx());
             clk.set_for_testing(2000);
 
-            let record = gauge_voting::cast_vote(&mut controller, 0, 0, &clk, scenario.ctx());
+            // Staking zero will abort in ve_staking with EZeroAmount
+            let stake_coin = coin::mint_for_testing<STAKE_COIN>(0, scenario.ctx());
+            let ve_token = ve_staking::stake(&mut pool, stake_coin, 126_230_400_000, &clk, scenario.ctx());
 
+            let record = gauge_voting::cast_vote(&mut controller, &pool, &ve_token, 0, &clk, scenario.ctx());
+
+            sui::transfer::public_transfer(ve_token, VOTER1);
             sui::transfer::public_transfer(record, VOTER1);
             clk.destroy_for_testing();
+            ts::return_shared(pool);
             ts::return_shared(controller);
         };
         scenario.end();
@@ -260,20 +294,27 @@ module crux::gauge_voting_tests {
             let mut clk = clock::create_for_testing(scenario.ctx());
             clk.set_for_testing(1000);
             gauge_voting::create_controller(&clk, scenario.ctx());
+            ve_staking::create_pool_for_testing(scenario.ctx());
             clk.destroy_for_testing();
         };
 
         ts::next_tx(&mut scenario, VOTER1);
         {
             let mut controller = scenario.take_shared<GaugeController>();
+            let mut pool = scenario.take_shared<VeStakingPool>();
             let mut clk = clock::create_for_testing(scenario.ctx());
             clk.set_for_testing(2000);
 
-            // No gauges added, index 0 doesn't exist
-            let record = gauge_voting::cast_vote(&mut controller, 0, 100 * WAD, &clk, scenario.ctx());
+            let stake_coin = coin::mint_for_testing<STAKE_COIN>(100, scenario.ctx());
+            let ve_token = ve_staking::stake(&mut pool, stake_coin, 126_230_400_000, &clk, scenario.ctx());
 
+            // No gauges added, index 0 doesn't exist
+            let record = gauge_voting::cast_vote(&mut controller, &pool, &ve_token, 0, &clk, scenario.ctx());
+
+            sui::transfer::public_transfer(ve_token, VOTER1);
             sui::transfer::public_transfer(record, VOTER1);
             clk.destroy_for_testing();
+            ts::return_shared(pool);
             ts::return_shared(controller);
         };
         scenario.end();

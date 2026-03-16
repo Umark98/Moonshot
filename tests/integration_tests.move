@@ -37,7 +37,9 @@ module crux::integration_tests {
             let vault = scenario.take_shared<SYVault<INT_COIN>>();
             let mut clk = clock::create_for_testing(scenario.ctx());
             clk.set_for_testing(1000);
-            yield_tokenizer::create_market<INT_COIN>(&vault, MATURITY_MS, &clk, scenario.ctx());
+            let admin_cap = scenario.take_from_sender<AdminCap>();
+            yield_tokenizer::create_market<INT_COIN>(&admin_cap, &vault, MATURITY_MS, &clk, scenario.ctx());
+            scenario.return_to_sender(admin_cap);
             clk.destroy_for_testing();
             ts::return_shared(vault);
         };
@@ -45,43 +47,37 @@ module crux::integration_tests {
         scenario
     }
 
-    /// Full lifecycle: deposit → wrap SY → mint PT+YT → redeem pre-expiry
+    /// Full lifecycle: deposit Coin<T> → mint PT+YT → redeem pre-expiry
     #[test]
     fun test_full_lifecycle_pre_expiry() {
         let mut scenario = setup();
 
-        // Alice deposits underlying, gets SY, mints PT+YT
+        // Alice deposits underlying coin, mints PT+YT, redeems pre-expiry
         ts::next_tx(&mut scenario, ALICE);
         {
-            let mut vault = scenario.take_shared<SYVault<INT_COIN>>();
-            let deposit = coin::mint_for_testing<INT_COIN>(5000, scenario.ctx());
-            let sy = standardized_yield::deposit(&mut vault, deposit, scenario.ctx());
-
-            assert!(standardized_yield::sy_amount(&sy) == 5000);
-            assert!(standardized_yield::total_supply(&vault) == 5000);
-            assert!(standardized_yield::total_underlying(&vault) == 5000);
-
-            ts::return_shared(vault);
-
             let mut config = scenario.take_shared<YieldMarketConfig<INT_COIN>>();
+            let vault = scenario.take_shared<SYVault<INT_COIN>>();
+            let deposit = coin::mint_for_testing<INT_COIN>(5000, scenario.ctx());
             let mut clk = clock::create_for_testing(scenario.ctx());
             clk.set_for_testing(2000);
 
-            let (pt, yt) = yield_tokenizer::mint_py(&mut config, sy, &clk, scenario.ctx());
+            let (pt, yt) = yield_tokenizer::mint_py(&mut config, &vault, deposit, &clk, scenario.ctx());
 
             assert!(yield_tokenizer::pt_amount(&pt) == 5000);
             assert!(yield_tokenizer::yt_amount(&yt) == 5000);
             assert!(yield_tokenizer::total_pt_supply(&config) == 5000);
             assert!(yield_tokenizer::total_yt_supply(&config) == 5000);
 
-            // Redeem PT+YT back to SY before expiry
-            let sy_back = yield_tokenizer::redeem_py_pre_expiry(&mut config, pt, yt, scenario.ctx());
-            assert!(sy_back == 5000);
+            // Redeem PT+YT back to Coin<T> before expiry
+            let coin_back = yield_tokenizer::redeem_py_pre_expiry(&mut config, &vault, pt, yt, scenario.ctx());
+            assert!(coin_back.value() == 5000);
             assert!(yield_tokenizer::total_pt_supply(&config) == 0);
             assert!(yield_tokenizer::total_yt_supply(&config) == 0);
 
+            sui::transfer::public_transfer(coin_back, ALICE);
             clk.destroy_for_testing();
             ts::return_shared(config);
+            ts::return_shared(vault);
         };
         scenario.end();
     }
@@ -94,20 +90,18 @@ module crux::integration_tests {
         // Alice deposits and mints
         ts::next_tx(&mut scenario, ALICE);
         {
-            let mut vault = scenario.take_shared<SYVault<INT_COIN>>();
-            let deposit = coin::mint_for_testing<INT_COIN>(2000, scenario.ctx());
-            let sy = standardized_yield::deposit(&mut vault, deposit, scenario.ctx());
-            ts::return_shared(vault);
-
             let mut config = scenario.take_shared<YieldMarketConfig<INT_COIN>>();
+            let vault = scenario.take_shared<SYVault<INT_COIN>>();
+            let deposit = coin::mint_for_testing<INT_COIN>(2000, scenario.ctx());
             let mut clk = clock::create_for_testing(scenario.ctx());
             clk.set_for_testing(2000);
-            let (pt, yt) = yield_tokenizer::mint_py(&mut config, sy, &clk, scenario.ctx());
+            let (pt, yt) = yield_tokenizer::mint_py(&mut config, &vault, deposit, &clk, scenario.ctx());
 
             sui::transfer::public_transfer(pt, ALICE);
             sui::transfer::public_transfer(yt, ALICE);
             clk.destroy_for_testing();
             ts::return_shared(config);
+            ts::return_shared(vault);
         };
 
         // Time passes, market settles
@@ -117,7 +111,9 @@ module crux::integration_tests {
             let mut clk = clock::create_for_testing(scenario.ctx());
             clk.set_for_testing(MATURITY_MS + 1);
 
-            yield_tokenizer::settle_market(&mut config, &clk);
+            let admin_cap = scenario.take_from_sender<AdminCap>();
+            yield_tokenizer::settle_market(&admin_cap, &mut config, &clk);
+            scenario.return_to_sender(admin_cap);
             assert!(yield_tokenizer::is_expired(&config));
             assert!(yield_tokenizer::settlement_py_index(&config) == WAD);
 
@@ -131,9 +127,10 @@ module crux::integration_tests {
             let mut config = scenario.take_shared<YieldMarketConfig<INT_COIN>>();
             let pt = scenario.take_from_sender<PT<INT_COIN>>();
 
-            let sy_back = yield_tokenizer::redeem_pt_post_expiry(&mut config, pt, scenario.ctx());
-            assert!(sy_back == 2000); // 1:1 at settlement since no rate change
+            let coin_back = yield_tokenizer::redeem_pt_post_expiry(&mut config, pt, scenario.ctx());
+            assert!(coin_back.value() == 2000); // 1:1 at settlement since no rate change
 
+            sui::transfer::public_transfer(coin_back, ALICE);
             ts::return_shared(config);
         };
         scenario.end();
@@ -147,20 +144,18 @@ module crux::integration_tests {
         // Alice deposits and mints PT+YT
         ts::next_tx(&mut scenario, ALICE);
         {
-            let mut vault = scenario.take_shared<SYVault<INT_COIN>>();
-            let deposit = coin::mint_for_testing<INT_COIN>(10000, scenario.ctx());
-            let sy = standardized_yield::deposit(&mut vault, deposit, scenario.ctx());
-            ts::return_shared(vault);
-
             let mut config = scenario.take_shared<YieldMarketConfig<INT_COIN>>();
+            let vault = scenario.take_shared<SYVault<INT_COIN>>();
+            let deposit = coin::mint_for_testing<INT_COIN>(10000, scenario.ctx());
             let mut clk = clock::create_for_testing(scenario.ctx());
             clk.set_for_testing(2000);
-            let (pt, yt) = yield_tokenizer::mint_py(&mut config, sy, &clk, scenario.ctx());
+            let (pt, yt) = yield_tokenizer::mint_py(&mut config, &vault, deposit, &clk, scenario.ctx());
 
             sui::transfer::public_transfer(pt, ALICE);
             sui::transfer::public_transfer(yt, ALICE);
             clk.destroy_for_testing();
             ts::return_shared(config);
+            ts::return_shared(vault);
         };
 
         // Exchange rate increases by 10% → yield accrues to YT holders
@@ -172,7 +167,7 @@ module crux::integration_tests {
             clk.set_for_testing(50000);
 
             let new_rate = WAD + WAD / 10; // 1.1 WAD
-            standardized_yield::update_exchange_rate(&mut vault, new_rate, &clk);
+            standardized_yield::update_exchange_rate_for_testing(&mut vault, new_rate, &clk);
             yield_tokenizer::update_py_index(&mut config, &vault, &clk);
 
             assert!(yield_tokenizer::current_py_index(&config) == new_rate);
@@ -187,20 +182,23 @@ module crux::integration_tests {
         ts::next_tx(&mut scenario, ALICE);
         {
             let mut config = scenario.take_shared<YieldMarketConfig<INT_COIN>>();
+            let vault = scenario.take_shared<SYVault<INT_COIN>>();
             let mut yt = scenario.take_from_sender<YT<INT_COIN>>();
 
             let pending = yield_tokenizer::pending_yield(&config, &yt);
             assert!(pending > 0);
 
-            let claimed = yield_tokenizer::claim_yield(&mut config, &mut yt, scenario.ctx());
-            assert!(claimed > 0);
+            let claimed = yield_tokenizer::claim_yield(&mut config, &vault, &mut yt, scenario.ctx());
+            assert!(claimed.value() > 0);
 
             // After claim, pending should be 0
             let pending_after = yield_tokenizer::pending_yield(&config, &yt);
             assert!(pending_after == 0);
 
+            sui::transfer::public_transfer(claimed, ALICE);
             sui::transfer::public_transfer(yt, ALICE);
             ts::return_shared(config);
+            ts::return_shared(vault);
         };
         scenario.end();
     }
@@ -213,15 +211,12 @@ module crux::integration_tests {
         // Alice mints PT+YT
         ts::next_tx(&mut scenario, ALICE);
         {
-            let mut vault = scenario.take_shared<SYVault<INT_COIN>>();
-            let deposit = coin::mint_for_testing<INT_COIN>(3000, scenario.ctx());
-            let sy = standardized_yield::deposit(&mut vault, deposit, scenario.ctx());
-            ts::return_shared(vault);
-
             let mut config = scenario.take_shared<YieldMarketConfig<INT_COIN>>();
+            let vault = scenario.take_shared<SYVault<INT_COIN>>();
+            let deposit = coin::mint_for_testing<INT_COIN>(3000, scenario.ctx());
             let mut clk = clock::create_for_testing(scenario.ctx());
             clk.set_for_testing(2000);
-            let (pt, yt) = yield_tokenizer::mint_py(&mut config, sy, &clk, scenario.ctx());
+            let (pt, yt) = yield_tokenizer::mint_py(&mut config, &vault, deposit, &clk, scenario.ctx());
 
             // Split PT: 2000 for Alice, 1000 for Bob
             let mut pt_alice = pt;
@@ -235,6 +230,7 @@ module crux::integration_tests {
             sui::transfer::public_transfer(yt, ALICE);
             clk.destroy_for_testing();
             ts::return_shared(config);
+            ts::return_shared(vault);
         };
 
         // Bob merges his PT with a new PT from a different mint
@@ -265,13 +261,11 @@ module crux::integration_tests {
             assert!(yield_tokenizer::pt_amount(&pt) == 5000);
             assert!(yield_tokenizer::yt_amount(&yt) == 5000);
 
-            // Step 2: Simulate selling PT on AMM by providing SY repayment
-            // In production: swap_pt_for_sy would return SY used to repay
+            // Step 2: Repay flash mint with underlying coin
             let repay_coin = coin::mint_for_testing<INT_COIN>(5100, scenario.ctx());
-            let repay_sy = standardized_yield::deposit(&mut vault, repay_coin, scenario.ctx());
 
             // Step 3: Repay flash mint receipt
-            flash_mint::repay_flash_mint(&mut vault, receipt, repay_sy, scenario.ctx());
+            flash_mint::repay_flash_mint(&mut config, &vault, receipt, repay_coin, scenario.ctx());
 
             // Alice keeps YT (leveraged yield exposure) and PT
             sui::transfer::public_transfer(pt, ALICE);
@@ -305,37 +299,33 @@ module crux::integration_tests {
         // Alice mints 6000 PT+YT
         ts::next_tx(&mut scenario, ALICE);
         {
-            let mut vault = scenario.take_shared<SYVault<INT_COIN>>();
-            let deposit = coin::mint_for_testing<INT_COIN>(6000, scenario.ctx());
-            let sy = standardized_yield::deposit(&mut vault, deposit, scenario.ctx());
-            ts::return_shared(vault);
-
             let mut config = scenario.take_shared<YieldMarketConfig<INT_COIN>>();
+            let vault = scenario.take_shared<SYVault<INT_COIN>>();
+            let deposit = coin::mint_for_testing<INT_COIN>(6000, scenario.ctx());
             let mut clk = clock::create_for_testing(scenario.ctx());
             clk.set_for_testing(2000);
-            let (pt, yt) = yield_tokenizer::mint_py(&mut config, sy, &clk, scenario.ctx());
+            let (pt, yt) = yield_tokenizer::mint_py(&mut config, &vault, deposit, &clk, scenario.ctx());
             sui::transfer::public_transfer(pt, ALICE);
             sui::transfer::public_transfer(yt, ALICE);
             clk.destroy_for_testing();
             ts::return_shared(config);
+            ts::return_shared(vault);
         };
 
         // Bob mints 4000 PT+YT
         ts::next_tx(&mut scenario, BOB);
         {
-            let mut vault = scenario.take_shared<SYVault<INT_COIN>>();
-            let deposit = coin::mint_for_testing<INT_COIN>(4000, scenario.ctx());
-            let sy = standardized_yield::deposit(&mut vault, deposit, scenario.ctx());
-            ts::return_shared(vault);
-
             let mut config = scenario.take_shared<YieldMarketConfig<INT_COIN>>();
+            let vault = scenario.take_shared<SYVault<INT_COIN>>();
+            let deposit = coin::mint_for_testing<INT_COIN>(4000, scenario.ctx());
             let mut clk = clock::create_for_testing(scenario.ctx());
             clk.set_for_testing(3000);
-            let (pt, yt) = yield_tokenizer::mint_py(&mut config, sy, &clk, scenario.ctx());
+            let (pt, yt) = yield_tokenizer::mint_py(&mut config, &vault, deposit, &clk, scenario.ctx());
             sui::transfer::public_transfer(pt, BOB);
             sui::transfer::public_transfer(yt, BOB);
             clk.destroy_for_testing();
             ts::return_shared(config);
+            ts::return_shared(vault);
         };
 
         // Verify total supply
@@ -356,7 +346,7 @@ module crux::integration_tests {
             clk.set_for_testing(50000);
 
             let new_rate = WAD + WAD / 20; // 1.05 WAD
-            standardized_yield::update_exchange_rate(&mut vault, new_rate, &clk);
+            standardized_yield::update_exchange_rate_for_testing(&mut vault, new_rate, &clk);
             yield_tokenizer::update_py_index(&mut config, &vault, &clk);
 
             clk.destroy_for_testing();
@@ -368,26 +358,32 @@ module crux::integration_tests {
         ts::next_tx(&mut scenario, ALICE);
         {
             let mut config = scenario.take_shared<YieldMarketConfig<INT_COIN>>();
+            let vault = scenario.take_shared<SYVault<INT_COIN>>();
             let mut yt = scenario.take_from_sender<YT<INT_COIN>>();
 
-            let alice_yield = yield_tokenizer::claim_yield(&mut config, &mut yt, scenario.ctx());
-            assert!(alice_yield > 0);
+            let alice_yield = yield_tokenizer::claim_yield(&mut config, &vault, &mut yt, scenario.ctx());
+            assert!(alice_yield.value() > 0);
 
+            sui::transfer::public_transfer(alice_yield, ALICE);
             sui::transfer::public_transfer(yt, ALICE);
             ts::return_shared(config);
+            ts::return_shared(vault);
         };
 
         // Bob claims yield (he has 4000 YT = 40% share)
         ts::next_tx(&mut scenario, BOB);
         {
             let mut config = scenario.take_shared<YieldMarketConfig<INT_COIN>>();
+            let vault = scenario.take_shared<SYVault<INT_COIN>>();
             let mut yt = scenario.take_from_sender<YT<INT_COIN>>();
 
-            let bob_yield = yield_tokenizer::claim_yield(&mut config, &mut yt, scenario.ctx());
-            assert!(bob_yield > 0);
+            let bob_yield = yield_tokenizer::claim_yield(&mut config, &vault, &mut yt, scenario.ctx());
+            assert!(bob_yield.value() > 0);
 
+            sui::transfer::public_transfer(bob_yield, BOB);
             sui::transfer::public_transfer(yt, BOB);
             ts::return_shared(config);
+            ts::return_shared(vault);
         };
         scenario.end();
     }

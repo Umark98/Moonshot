@@ -61,15 +61,13 @@ module crux::permissionless_market_tests {
         ts::next_tx(&mut scenario, CREATOR);
         {
             let mut registry = scenario.take_shared<MarketRegistry>();
-            let vault = scenario.take_shared<SYVault<MKT_COIN>>();
+            let mut vault = scenario.take_shared<SYVault<MKT_COIN>>();
             let mut clk = clock::create_for_testing(scenario.ctx());
             clk.set_for_testing(1000);
 
             // Deposit to get SY for seeding
-            let mut vault_mut = scenario.take_shared<SYVault<MKT_COIN>>();
             let deposit = coin::mint_for_testing<MKT_COIN>(500, scenario.ctx());
-            let sy = standardized_yield::deposit(&mut vault_mut, deposit, scenario.ctx());
-            ts::return_shared(vault_mut);
+            let sy = standardized_yield::deposit(&mut vault, deposit, scenario.ctx());
 
             let maturity = 1000 + ONE_YEAR_MS;
             let market_id = permissionless_market::create_market(
@@ -97,16 +95,14 @@ module crux::permissionless_market_tests {
         ts::next_tx(&mut scenario, CREATOR);
         {
             let mut registry = scenario.take_shared<MarketRegistry>();
-            let vault = scenario.take_shared<SYVault<MKT_COIN>>();
+            let mut vault = scenario.take_shared<SYVault<MKT_COIN>>();
             let mut clk = clock::create_for_testing(scenario.ctx());
             clk.set_for_testing(1000);
 
-            let mut vault_mut = scenario.take_shared<SYVault<MKT_COIN>>();
             let deposit1 = coin::mint_for_testing<MKT_COIN>(200, scenario.ctx());
-            let sy1 = standardized_yield::deposit(&mut vault_mut, deposit1, scenario.ctx());
+            let sy1 = standardized_yield::deposit(&mut vault, deposit1, scenario.ctx());
             let deposit2 = coin::mint_for_testing<MKT_COIN>(200, scenario.ctx());
-            let sy2 = standardized_yield::deposit(&mut vault_mut, deposit2, scenario.ctx());
-            ts::return_shared(vault_mut);
+            let sy2 = standardized_yield::deposit(&mut vault, deposit2, scenario.ctx());
 
             let maturity = 1000 + ONE_YEAR_MS;
 
@@ -135,14 +131,12 @@ module crux::permissionless_market_tests {
         ts::next_tx(&mut scenario, CREATOR);
         {
             let mut registry = scenario.take_shared<MarketRegistry>();
-            let vault = scenario.take_shared<SYVault<MKT_COIN>>();
+            let mut vault = scenario.take_shared<SYVault<MKT_COIN>>();
             let mut clk = clock::create_for_testing(scenario.ctx());
             clk.set_for_testing(1000);
 
-            let mut vault_mut = scenario.take_shared<SYVault<MKT_COIN>>();
             let deposit = coin::mint_for_testing<MKT_COIN>(200, scenario.ctx());
-            let sy = standardized_yield::deposit(&mut vault_mut, deposit, scenario.ctx());
-            ts::return_shared(vault_mut);
+            let sy = standardized_yield::deposit(&mut vault, deposit, scenario.ctx());
 
             // Maturity only 1 day away (< 7 day minimum)
             let maturity = 1000 + 86_400_000;
@@ -165,14 +159,12 @@ module crux::permissionless_market_tests {
         ts::next_tx(&mut scenario, CREATOR);
         {
             let mut registry = scenario.take_shared<MarketRegistry>();
-            let vault = scenario.take_shared<SYVault<MKT_COIN>>();
+            let mut vault = scenario.take_shared<SYVault<MKT_COIN>>();
             let mut clk = clock::create_for_testing(scenario.ctx());
             clk.set_for_testing(1000);
 
-            let mut vault_mut = scenario.take_shared<SYVault<MKT_COIN>>();
             let deposit = coin::mint_for_testing<MKT_COIN>(50, scenario.ctx());
-            let sy = standardized_yield::deposit(&mut vault_mut, deposit, scenario.ctx());
-            ts::return_shared(vault_mut);
+            let sy = standardized_yield::deposit(&mut vault, deposit, scenario.ctx());
 
             // Only 50 SY, need at least 100
             let maturity = 1000 + ONE_YEAR_MS;

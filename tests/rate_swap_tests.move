@@ -3,7 +3,7 @@ module crux::rate_swap_tests {
     use sui::test_scenario::{Self as ts};
     use sui::clock;
 
-    use crux::rate_swap::{Self, SwapOffer, SwapContract};
+    use crux::rate_swap::{Self, SwapOffer, SwapContract, AdminCap};
 
     const ALICE: address = @0xA1;
     const BOB: address = @0xB0B;
@@ -111,6 +111,7 @@ module crux::rate_swap_tests {
     fun test_settle_fixed_payer_wins() {
         let mut scenario = ts::begin(ALICE);
         {
+            rate_swap::init_for_testing(scenario.ctx());
             let mut clk = clock::create_for_testing(scenario.ctx());
             clk.set_for_testing(1000);
             rate_swap::create_offer(true, 10_000, WAD / 20, MATURITY, 1_000, &clk, scenario.ctx());
@@ -130,12 +131,13 @@ module crux::rate_swap_tests {
         // Settle: variable rate = 8% > fixed rate = 5%, fixed payer wins
         ts::next_tx(&mut scenario, ALICE);
         {
+            let admin_cap = scenario.take_from_sender<AdminCap>();
             let mut swap = scenario.take_shared<SwapContract>();
             let mut clk = clock::create_for_testing(scenario.ctx());
             clk.set_for_testing(MATURITY + 1);
 
             let variable_rate = WAD * 8 / 100; // 8%
-            rate_swap::settle_swap(&mut swap, variable_rate, &clk);
+            rate_swap::settle_swap(&admin_cap, &mut swap, variable_rate, &clk);
 
             assert!(rate_swap::is_settled(&swap));
 
@@ -145,6 +147,7 @@ module crux::rate_swap_tests {
             assert!(settlement_rate == variable_rate);
 
             clk.destroy_for_testing();
+            scenario.return_to_sender(admin_cap);
             ts::return_shared(swap);
         };
         scenario.end();
@@ -154,6 +157,7 @@ module crux::rate_swap_tests {
     fun test_settle_variable_payer_wins() {
         let mut scenario = ts::begin(ALICE);
         {
+            rate_swap::init_for_testing(scenario.ctx());
             let mut clk = clock::create_for_testing(scenario.ctx());
             clk.set_for_testing(1000);
             rate_swap::create_offer(true, 10_000, WAD / 20, MATURITY, 1_000, &clk, scenario.ctx());
@@ -173,16 +177,18 @@ module crux::rate_swap_tests {
         // Settle: variable rate = 2% < fixed rate = 5%, variable payer wins
         ts::next_tx(&mut scenario, ALICE);
         {
+            let admin_cap = scenario.take_from_sender<AdminCap>();
             let mut swap = scenario.take_shared<SwapContract>();
             let mut clk = clock::create_for_testing(scenario.ctx());
             clk.set_for_testing(MATURITY + 1);
 
             let variable_rate = WAD * 2 / 100; // 2%
-            rate_swap::settle_swap(&mut swap, variable_rate, &clk);
+            rate_swap::settle_swap(&admin_cap, &mut swap, variable_rate, &clk);
 
             assert!(rate_swap::is_settled(&swap));
 
             clk.destroy_for_testing();
+            scenario.return_to_sender(admin_cap);
             ts::return_shared(swap);
         };
         scenario.end();
@@ -193,6 +199,7 @@ module crux::rate_swap_tests {
     fun test_settle_before_maturity() {
         let mut scenario = ts::begin(ALICE);
         {
+            rate_swap::init_for_testing(scenario.ctx());
             let mut clk = clock::create_for_testing(scenario.ctx());
             clk.set_for_testing(1000);
             rate_swap::create_offer(true, 10_000, WAD / 20, MATURITY, 1_000, &clk, scenario.ctx());
@@ -211,13 +218,15 @@ module crux::rate_swap_tests {
 
         ts::next_tx(&mut scenario, ALICE);
         {
+            let admin_cap = scenario.take_from_sender<AdminCap>();
             let mut swap = scenario.take_shared<SwapContract>();
             let mut clk = clock::create_for_testing(scenario.ctx());
             clk.set_for_testing(50_000); // before maturity
 
-            rate_swap::settle_swap(&mut swap, WAD / 10, &clk);
+            rate_swap::settle_swap(&admin_cap, &mut swap, WAD / 10, &clk);
 
             clk.destroy_for_testing();
+            scenario.return_to_sender(admin_cap);
             ts::return_shared(swap);
         };
         scenario.end();
@@ -228,6 +237,7 @@ module crux::rate_swap_tests {
     fun test_double_settle() {
         let mut scenario = ts::begin(ALICE);
         {
+            rate_swap::init_for_testing(scenario.ctx());
             let mut clk = clock::create_for_testing(scenario.ctx());
             clk.set_for_testing(1000);
             rate_swap::create_offer(true, 10_000, WAD / 20, MATURITY, 1_000, &clk, scenario.ctx());
@@ -246,14 +256,16 @@ module crux::rate_swap_tests {
 
         ts::next_tx(&mut scenario, ALICE);
         {
+            let admin_cap = scenario.take_from_sender<AdminCap>();
             let mut swap = scenario.take_shared<SwapContract>();
             let mut clk = clock::create_for_testing(scenario.ctx());
             clk.set_for_testing(MATURITY + 1);
-            rate_swap::settle_swap(&mut swap, WAD / 10, &clk);
-            // Try again — should fail
-            rate_swap::settle_swap(&mut swap, WAD / 10, &clk);
+            rate_swap::settle_swap(&admin_cap, &mut swap, WAD / 10, &clk);
+            // Try again -- should fail
+            rate_swap::settle_swap(&admin_cap, &mut swap, WAD / 10, &clk);
 
             clk.destroy_for_testing();
+            scenario.return_to_sender(admin_cap);
             ts::return_shared(swap);
         };
         scenario.end();

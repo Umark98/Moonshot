@@ -2,8 +2,12 @@
 module crux::governor_tests {
     use sui::test_scenario::{Self as ts};
     use sui::clock;
+    use sui::coin;
 
     use crux::governor::{Self, GovernorState, GovernorAdminCap};
+    use crux::ve_staking::{Self, VeStakingPool, VeToken};
+
+    public struct STAKE_COIN has drop {}
 
     const ADMIN: address = @0xAD;
     const VOTER1: address = @0xB0B;
@@ -17,6 +21,7 @@ module crux::governor_tests {
         let mut scenario = ts::begin(ADMIN);
         {
             governor::init_for_testing(scenario.ctx());
+            ve_staking::create_pool_for_testing(scenario.ctx());
         };
         scenario
     }
@@ -28,11 +33,17 @@ module crux::governor_tests {
         scenario.next_tx(ADMIN);
         {
             let mut state = scenario.take_shared<GovernorState>();
+            let mut pool = scenario.take_shared<VeStakingPool>();
             let mut clock = clock::create_for_testing(scenario.ctx());
             clock.set_for_testing(1000);
 
+            let stake_coin = coin::mint_for_testing<STAKE_COIN>(4000, scenario.ctx());
+            let ve_token = ve_staking::stake(&mut pool, stake_coin, 31_557_600_000, &clock, scenario.ctx());
+
             let proposal_id = governor::create_proposal(
                 &mut state,
+                &pool,
+                &ve_token,
                 b"Test Proposal",
                 &clock,
                 scenario.ctx(),
@@ -44,7 +55,9 @@ module crux::governor_tests {
             let proposal_state = governor::proposal_state(&state, 0);
             assert!(proposal_state == 0); // STATE_ACTIVE
 
+            sui::transfer::public_transfer(ve_token, ADMIN);
             clock.destroy_for_testing();
+            ts::return_shared(pool);
             ts::return_shared(state);
         };
         scenario.end();
@@ -58,10 +71,15 @@ module crux::governor_tests {
         scenario.next_tx(ADMIN);
         {
             let mut state = scenario.take_shared<GovernorState>();
+            let mut pool = scenario.take_shared<VeStakingPool>();
             let mut clock = clock::create_for_testing(scenario.ctx());
             clock.set_for_testing(1000);
-            governor::create_proposal(&mut state, b"Vote Test", &clock, scenario.ctx());
+            let stake_coin = coin::mint_for_testing<STAKE_COIN>(4000, scenario.ctx());
+            let ve_token = ve_staking::stake(&mut pool, stake_coin, 31_557_600_000, &clock, scenario.ctx());
+            governor::create_proposal(&mut state, &pool, &ve_token, b"Vote Test", &clock, scenario.ctx());
+            sui::transfer::public_transfer(ve_token, ADMIN);
             clock.destroy_for_testing();
+            ts::return_shared(pool);
             ts::return_shared(state);
         };
 
@@ -69,19 +87,26 @@ module crux::governor_tests {
         scenario.next_tx(VOTER1);
         {
             let mut state = scenario.take_shared<GovernorState>();
+            let mut pool = scenario.take_shared<VeStakingPool>();
             let mut clock = clock::create_for_testing(scenario.ctx());
             clock.set_for_testing(2000);
 
+            let stake_coin = coin::mint_for_testing<STAKE_COIN>(60_000, scenario.ctx());
+            let ve_token = ve_staking::stake(&mut pool, stake_coin, 31_557_600_000, &clock, scenario.ctx());
+
             governor::cast_vote(
                 &mut state,
+                &pool,
+                &ve_token,
                 0,
                 true,
-                60_000,
                 &clock,
                 scenario.ctx(),
             );
 
+            sui::transfer::public_transfer(ve_token, VOTER1);
             clock.destroy_for_testing();
+            ts::return_shared(pool);
             ts::return_shared(state);
         };
 
@@ -89,19 +114,26 @@ module crux::governor_tests {
         scenario.next_tx(VOTER2);
         {
             let mut state = scenario.take_shared<GovernorState>();
+            let mut pool = scenario.take_shared<VeStakingPool>();
             let mut clock = clock::create_for_testing(scenario.ctx());
             clock.set_for_testing(3000);
 
+            let stake_coin = coin::mint_for_testing<STAKE_COIN>(50_000, scenario.ctx());
+            let ve_token = ve_staking::stake(&mut pool, stake_coin, 31_557_600_000, &clock, scenario.ctx());
+
             governor::cast_vote(
                 &mut state,
+                &pool,
+                &ve_token,
                 0,
                 true,
-                50_000,
                 &clock,
                 scenario.ctx(),
             );
 
+            sui::transfer::public_transfer(ve_token, VOTER2);
             clock.destroy_for_testing();
+            ts::return_shared(pool);
             ts::return_shared(state);
         };
         scenario.end();
@@ -117,10 +149,15 @@ module crux::governor_tests {
         scenario.next_tx(ADMIN);
         {
             let mut state = scenario.take_shared<GovernorState>();
+            let mut pool = scenario.take_shared<VeStakingPool>();
             let mut clock = clock::create_for_testing(scenario.ctx());
             clock.set_for_testing(start_ms);
-            governor::create_proposal(&mut state, b"Lifecycle Test", &clock, scenario.ctx());
+            let stake_coin = coin::mint_for_testing<STAKE_COIN>(4000, scenario.ctx());
+            let ve_token = ve_staking::stake(&mut pool, stake_coin, 31_557_600_000, &clock, scenario.ctx());
+            governor::create_proposal(&mut state, &pool, &ve_token, b"Lifecycle Test", &clock, scenario.ctx());
+            sui::transfer::public_transfer(ve_token, ADMIN);
             clock.destroy_for_testing();
+            ts::return_shared(pool);
             ts::return_shared(state);
         };
 
@@ -128,20 +165,30 @@ module crux::governor_tests {
         scenario.next_tx(VOTER1);
         {
             let mut state = scenario.take_shared<GovernorState>();
+            let mut pool = scenario.take_shared<VeStakingPool>();
             let mut clock = clock::create_for_testing(scenario.ctx());
             clock.set_for_testing(start_ms + 1000);
-            governor::cast_vote(&mut state, 0, true, 70_000, &clock, scenario.ctx());
+            let stake_coin = coin::mint_for_testing<STAKE_COIN>(280_000, scenario.ctx());
+            let ve_token = ve_staking::stake(&mut pool, stake_coin, 31_557_600_000, &clock, scenario.ctx());
+            governor::cast_vote(&mut state, &pool, &ve_token, 0, true, &clock, scenario.ctx());
+            sui::transfer::public_transfer(ve_token, VOTER1);
             clock.destroy_for_testing();
+            ts::return_shared(pool);
             ts::return_shared(state);
         };
 
         scenario.next_tx(VOTER2);
         {
             let mut state = scenario.take_shared<GovernorState>();
+            let mut pool = scenario.take_shared<VeStakingPool>();
             let mut clock = clock::create_for_testing(scenario.ctx());
             clock.set_for_testing(start_ms + 2000);
-            governor::cast_vote(&mut state, 0, true, 40_000, &clock, scenario.ctx());
+            let stake_coin = coin::mint_for_testing<STAKE_COIN>(160_000, scenario.ctx());
+            let ve_token = ve_staking::stake(&mut pool, stake_coin, 31_557_600_000, &clock, scenario.ctx());
+            governor::cast_vote(&mut state, &pool, &ve_token, 0, true, &clock, scenario.ctx());
+            sui::transfer::public_transfer(ve_token, VOTER2);
             clock.destroy_for_testing();
+            ts::return_shared(pool);
             ts::return_shared(state);
         };
 
@@ -185,10 +232,15 @@ module crux::governor_tests {
         scenario.next_tx(ADMIN);
         {
             let mut state = scenario.take_shared<GovernorState>();
+            let mut pool = scenario.take_shared<VeStakingPool>();
             let mut clock = clock::create_for_testing(scenario.ctx());
             clock.set_for_testing(1000);
-            governor::create_proposal(&mut state, b"Cancel Test", &clock, scenario.ctx());
+            let stake_coin = coin::mint_for_testing<STAKE_COIN>(4000, scenario.ctx());
+            let ve_token = ve_staking::stake(&mut pool, stake_coin, 31_557_600_000, &clock, scenario.ctx());
+            governor::create_proposal(&mut state, &pool, &ve_token, b"Cancel Test", &clock, scenario.ctx());
+            sui::transfer::public_transfer(ve_token, ADMIN);
             clock.destroy_for_testing();
+            ts::return_shared(pool);
             ts::return_shared(state);
         };
 
@@ -218,10 +270,15 @@ module crux::governor_tests {
         scenario.next_tx(ADMIN);
         {
             let mut state = scenario.take_shared<GovernorState>();
+            let mut pool = scenario.take_shared<VeStakingPool>();
             let mut clock = clock::create_for_testing(scenario.ctx());
             clock.set_for_testing(1000);
-            governor::create_proposal(&mut state, b"Double Vote", &clock, scenario.ctx());
+            let stake_coin = coin::mint_for_testing<STAKE_COIN>(4000, scenario.ctx());
+            let ve_token = ve_staking::stake(&mut pool, stake_coin, 31_557_600_000, &clock, scenario.ctx());
+            governor::create_proposal(&mut state, &pool, &ve_token, b"Double Vote", &clock, scenario.ctx());
+            sui::transfer::public_transfer(ve_token, ADMIN);
             clock.destroy_for_testing();
+            ts::return_shared(pool);
             ts::return_shared(state);
         };
 
@@ -229,10 +286,15 @@ module crux::governor_tests {
         scenario.next_tx(VOTER1);
         {
             let mut state = scenario.take_shared<GovernorState>();
+            let mut pool = scenario.take_shared<VeStakingPool>();
             let mut clock = clock::create_for_testing(scenario.ctx());
             clock.set_for_testing(2000);
-            governor::cast_vote(&mut state, 0, true, 50_000, &clock, scenario.ctx());
+            let stake_coin = coin::mint_for_testing<STAKE_COIN>(50_000, scenario.ctx());
+            let ve_token = ve_staking::stake(&mut pool, stake_coin, 31_557_600_000, &clock, scenario.ctx());
+            governor::cast_vote(&mut state, &pool, &ve_token, 0, true, &clock, scenario.ctx());
+            sui::transfer::public_transfer(ve_token, VOTER1);
             clock.destroy_for_testing();
+            ts::return_shared(pool);
             ts::return_shared(state);
         };
 
@@ -240,10 +302,14 @@ module crux::governor_tests {
         scenario.next_tx(VOTER1);
         {
             let mut state = scenario.take_shared<GovernorState>();
+            let mut pool = scenario.take_shared<VeStakingPool>();
+            let ve_token = scenario.take_from_sender<VeToken>();
             let mut clock = clock::create_for_testing(scenario.ctx());
             clock.set_for_testing(3000);
-            governor::cast_vote(&mut state, 0, true, 50_000, &clock, scenario.ctx());
+            governor::cast_vote(&mut state, &pool, &ve_token, 0, true, &clock, scenario.ctx());
+            sui::transfer::public_transfer(ve_token, VOTER1);
             clock.destroy_for_testing();
+            ts::return_shared(pool);
             ts::return_shared(state);
         };
         scenario.end();
@@ -258,10 +324,15 @@ module crux::governor_tests {
         scenario.next_tx(ADMIN);
         {
             let mut state = scenario.take_shared<GovernorState>();
+            let mut pool = scenario.take_shared<VeStakingPool>();
             let mut clock = clock::create_for_testing(scenario.ctx());
             clock.set_for_testing(1000);
-            governor::create_proposal(&mut state, b"No Quorum", &clock, scenario.ctx());
+            let stake_coin = coin::mint_for_testing<STAKE_COIN>(4000, scenario.ctx());
+            let ve_token = ve_staking::stake(&mut pool, stake_coin, 31_557_600_000, &clock, scenario.ctx());
+            governor::create_proposal(&mut state, &pool, &ve_token, b"No Quorum", &clock, scenario.ctx());
+            sui::transfer::public_transfer(ve_token, ADMIN);
             clock.destroy_for_testing();
+            ts::return_shared(pool);
             ts::return_shared(state);
         };
 
@@ -269,10 +340,15 @@ module crux::governor_tests {
         scenario.next_tx(VOTER1);
         {
             let mut state = scenario.take_shared<GovernorState>();
+            let mut pool = scenario.take_shared<VeStakingPool>();
             let mut clock = clock::create_for_testing(scenario.ctx());
             clock.set_for_testing(2000);
-            governor::cast_vote(&mut state, 0, true, 50_000, &clock, scenario.ctx());
+            let stake_coin = coin::mint_for_testing<STAKE_COIN>(50_000, scenario.ctx());
+            let ve_token = ve_staking::stake(&mut pool, stake_coin, 31_557_600_000, &clock, scenario.ctx());
+            governor::cast_vote(&mut state, &pool, &ve_token, 0, true, &clock, scenario.ctx());
+            sui::transfer::public_transfer(ve_token, VOTER1);
             clock.destroy_for_testing();
+            ts::return_shared(pool);
             ts::return_shared(state);
         };
 
@@ -298,10 +374,15 @@ module crux::governor_tests {
         scenario.next_tx(ADMIN);
         {
             let mut state = scenario.take_shared<GovernorState>();
+            let mut pool = scenario.take_shared<VeStakingPool>();
             let mut clock = clock::create_for_testing(scenario.ctx());
             clock.set_for_testing(1000);
-            governor::create_proposal(&mut state, b"Defeated", &clock, scenario.ctx());
+            let stake_coin = coin::mint_for_testing<STAKE_COIN>(4000, scenario.ctx());
+            let ve_token = ve_staking::stake(&mut pool, stake_coin, 31_557_600_000, &clock, scenario.ctx());
+            governor::create_proposal(&mut state, &pool, &ve_token, b"Defeated", &clock, scenario.ctx());
+            sui::transfer::public_transfer(ve_token, ADMIN);
             clock.destroy_for_testing();
+            ts::return_shared(pool);
             ts::return_shared(state);
         };
 
@@ -309,20 +390,30 @@ module crux::governor_tests {
         scenario.next_tx(VOTER1);
         {
             let mut state = scenario.take_shared<GovernorState>();
+            let mut pool = scenario.take_shared<VeStakingPool>();
             let mut clock = clock::create_for_testing(scenario.ctx());
             clock.set_for_testing(2000);
-            governor::cast_vote(&mut state, 0, false, 60_000, &clock, scenario.ctx());
+            let stake_coin = coin::mint_for_testing<STAKE_COIN>(240_000, scenario.ctx());
+            let ve_token = ve_staking::stake(&mut pool, stake_coin, 31_557_600_000, &clock, scenario.ctx());
+            governor::cast_vote(&mut state, &pool, &ve_token, 0, false, &clock, scenario.ctx());
+            sui::transfer::public_transfer(ve_token, VOTER1);
             clock.destroy_for_testing();
+            ts::return_shared(pool);
             ts::return_shared(state);
         };
 
         scenario.next_tx(VOTER2);
         {
             let mut state = scenario.take_shared<GovernorState>();
+            let mut pool = scenario.take_shared<VeStakingPool>();
             let mut clock = clock::create_for_testing(scenario.ctx());
             clock.set_for_testing(3000);
-            governor::cast_vote(&mut state, 0, true, 50_000, &clock, scenario.ctx());
+            let stake_coin = coin::mint_for_testing<STAKE_COIN>(200_000, scenario.ctx());
+            let ve_token = ve_staking::stake(&mut pool, stake_coin, 31_557_600_000, &clock, scenario.ctx());
+            governor::cast_vote(&mut state, &pool, &ve_token, 0, true, &clock, scenario.ctx());
+            sui::transfer::public_transfer(ve_token, VOTER2);
             clock.destroy_for_testing();
+            ts::return_shared(pool);
             ts::return_shared(state);
         };
 
@@ -349,20 +440,30 @@ module crux::governor_tests {
         scenario.next_tx(ADMIN);
         {
             let mut state = scenario.take_shared<GovernorState>();
+            let mut pool = scenario.take_shared<VeStakingPool>();
             let mut clock = clock::create_for_testing(scenario.ctx());
             clock.set_for_testing(start_ms);
-            governor::create_proposal(&mut state, b"Early Execute", &clock, scenario.ctx());
+            let stake_coin = coin::mint_for_testing<STAKE_COIN>(4000, scenario.ctx());
+            let ve_token = ve_staking::stake(&mut pool, stake_coin, 31_557_600_000, &clock, scenario.ctx());
+            governor::create_proposal(&mut state, &pool, &ve_token, b"Early Execute", &clock, scenario.ctx());
+            sui::transfer::public_transfer(ve_token, ADMIN);
             clock.destroy_for_testing();
+            ts::return_shared(pool);
             ts::return_shared(state);
         };
 
         scenario.next_tx(VOTER1);
         {
             let mut state = scenario.take_shared<GovernorState>();
+            let mut pool = scenario.take_shared<VeStakingPool>();
             let mut clock = clock::create_for_testing(scenario.ctx());
             clock.set_for_testing(start_ms + 1000);
-            governor::cast_vote(&mut state, 0, true, QUORUM_VOTES + 1, &clock, scenario.ctx());
+            let stake_coin = coin::mint_for_testing<STAKE_COIN>((QUORUM_VOTES + 1) * 4, scenario.ctx());
+            let ve_token = ve_staking::stake(&mut pool, stake_coin, 31_557_600_000, &clock, scenario.ctx());
+            governor::cast_vote(&mut state, &pool, &ve_token, 0, true, &clock, scenario.ctx());
+            sui::transfer::public_transfer(ve_token, VOTER1);
             clock.destroy_for_testing();
+            ts::return_shared(pool);
             ts::return_shared(state);
         };
 

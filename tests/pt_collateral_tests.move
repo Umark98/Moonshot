@@ -39,7 +39,9 @@ module crux::pt_collateral_tests {
             let vault = scenario.take_shared<SYVault<COLL_COIN>>();
             let mut clk = clock::create_for_testing(scenario.ctx());
             clk.set_for_testing(1000);
-            yield_tokenizer::create_market<COLL_COIN>(&vault, MATURITY_MS, &clk, scenario.ctx());
+            let admin_cap = scenario.take_from_sender<AdminCap>();
+            yield_tokenizer::create_market<COLL_COIN>(&admin_cap, &vault, MATURITY_MS, &clk, scenario.ctx());
+            scenario.return_to_sender(admin_cap);
             clk.destroy_for_testing();
             ts::return_shared(vault);
         };
@@ -62,18 +64,16 @@ module crux::pt_collateral_tests {
         // Mint PT for user
         ts::next_tx(&mut scenario, USER);
         {
-            let mut vault = scenario.take_shared<SYVault<COLL_COIN>>();
-            let deposit = coin::mint_for_testing<COLL_COIN>(1000, scenario.ctx());
-            let sy = standardized_yield::deposit(&mut vault, deposit, scenario.ctx());
-            ts::return_shared(vault);
-
             let mut config = scenario.take_shared<YieldMarketConfig<COLL_COIN>>();
+            let vault = scenario.take_shared<SYVault<COLL_COIN>>();
+            let deposit = coin::mint_for_testing<COLL_COIN>(1000, scenario.ctx());
             let mut clk = clock::create_for_testing(scenario.ctx());
             clk.set_for_testing(2000);
-            let (pt, yt) = yield_tokenizer::mint_py(&mut config, sy, &clk, scenario.ctx());
+            let (pt, yt) = yield_tokenizer::mint_py(&mut config, &vault, deposit, &clk, scenario.ctx());
             sui::transfer::public_transfer(yt, USER);
             clk.destroy_for_testing();
             ts::return_shared(config);
+            ts::return_shared(vault);
 
             // Deposit PT as collateral
             let mut manager = scenario.take_shared<CollateralManager<COLL_COIN>>();
@@ -98,18 +98,16 @@ module crux::pt_collateral_tests {
         // Mint PT + deposit as collateral
         ts::next_tx(&mut scenario, USER);
         {
-            let mut vault = scenario.take_shared<SYVault<COLL_COIN>>();
-            let deposit = coin::mint_for_testing<COLL_COIN>(1000, scenario.ctx());
-            let sy = standardized_yield::deposit(&mut vault, deposit, scenario.ctx());
-            ts::return_shared(vault);
-
             let mut config = scenario.take_shared<YieldMarketConfig<COLL_COIN>>();
+            let vault = scenario.take_shared<SYVault<COLL_COIN>>();
+            let deposit = coin::mint_for_testing<COLL_COIN>(1000, scenario.ctx());
             let mut clk = clock::create_for_testing(scenario.ctx());
             clk.set_for_testing(2000);
-            let (pt, yt) = yield_tokenizer::mint_py(&mut config, sy, &clk, scenario.ctx());
+            let (pt, yt) = yield_tokenizer::mint_py(&mut config, &vault, deposit, &clk, scenario.ctx());
             sui::transfer::public_transfer(yt, USER);
             clk.destroy_for_testing();
             ts::return_shared(config);
+            ts::return_shared(vault);
 
             let mut manager = scenario.take_shared<CollateralManager<COLL_COIN>>();
             let mut clk2 = clock::create_for_testing(scenario.ctx());
@@ -164,18 +162,16 @@ module crux::pt_collateral_tests {
 
         ts::next_tx(&mut scenario, USER);
         {
-            let mut vault = scenario.take_shared<SYVault<COLL_COIN>>();
-            let deposit = coin::mint_for_testing<COLL_COIN>(1000, scenario.ctx());
-            let sy = standardized_yield::deposit(&mut vault, deposit, scenario.ctx());
-            ts::return_shared(vault);
-
             let mut config = scenario.take_shared<YieldMarketConfig<COLL_COIN>>();
+            let vault = scenario.take_shared<SYVault<COLL_COIN>>();
+            let deposit = coin::mint_for_testing<COLL_COIN>(1000, scenario.ctx());
             let mut clk = clock::create_for_testing(scenario.ctx());
             clk.set_for_testing(2000);
-            let (pt, yt) = yield_tokenizer::mint_py(&mut config, sy, &clk, scenario.ctx());
+            let (pt, yt) = yield_tokenizer::mint_py(&mut config, &vault, deposit, &clk, scenario.ctx());
             sui::transfer::public_transfer(yt, USER);
             clk.destroy_for_testing();
             ts::return_shared(config);
+            ts::return_shared(vault);
 
             let mut manager = scenario.take_shared<CollateralManager<COLL_COIN>>();
             let mut clk2 = clock::create_for_testing(scenario.ctx());
@@ -209,18 +205,16 @@ module crux::pt_collateral_tests {
 
         ts::next_tx(&mut scenario, USER);
         {
-            let mut vault = scenario.take_shared<SYVault<COLL_COIN>>();
-            let deposit = coin::mint_for_testing<COLL_COIN>(1000, scenario.ctx());
-            let sy = standardized_yield::deposit(&mut vault, deposit, scenario.ctx());
-            ts::return_shared(vault);
-
             let mut config = scenario.take_shared<YieldMarketConfig<COLL_COIN>>();
+            let vault = scenario.take_shared<SYVault<COLL_COIN>>();
+            let deposit = coin::mint_for_testing<COLL_COIN>(1000, scenario.ctx());
             let mut clk = clock::create_for_testing(scenario.ctx());
             clk.set_for_testing(2000);
-            let (pt, yt) = yield_tokenizer::mint_py(&mut config, sy, &clk, scenario.ctx());
+            let (pt, yt) = yield_tokenizer::mint_py(&mut config, &vault, deposit, &clk, scenario.ctx());
             sui::transfer::public_transfer(yt, USER);
             clk.destroy_for_testing();
             ts::return_shared(config);
+            ts::return_shared(vault);
 
             let mut manager = scenario.take_shared<CollateralManager<COLL_COIN>>();
             let mut clk2 = clock::create_for_testing(scenario.ctx());
